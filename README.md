@@ -16,7 +16,9 @@ AI 自主渗透测试系统 ARTEX **增强**版（Go 后端 + Next.js 前端）
 
 因为，**今天**如果我没更新，**下周**它就被淘汰了。
 
+**使用方法**：①Agent打开目录一键部署(首推)
 
+②下载后双击目录下install.bat即可傻瓜式一键部署安装
 
 </div>
 
@@ -464,7 +466,8 @@ flowchart TB
 ## 参考
 
 https://github.com/oritera/Cairn
-https://github.com/oritera/Cairn
+
+https://github.com/Autumn-27/ARTEX
 
 
 ## 许可与免责声明
