@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/Autumn-27/artex/internal/testutil"
 )
 
 // openLegacyIndex builds the index exactly as the pre-reclamation Open did: a
@@ -35,7 +37,7 @@ func openLegacyIndex(t *testing.T, dir string) *sql.DB {
 // named "file:/…" — an empty index, with every recorded exchange apparently
 // gone. The assertions below are what prove that does not happen.
 func TestUpgradeFromOldInstall(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	path := filepath.Join(dir, "_index", "index.sqlite")
 	old := openLegacyIndex(t, dir)
 	if _, err := old.Exec(ftsSchema); err != nil {
@@ -135,7 +137,7 @@ VALUES(?,'GET /x','','HTTP 200','老数据正文')`, row[0]); err != nil {
 // nothing about it. auto_vacuum only changes where SQLite tracks free pages, so
 // the old binary simply goes back to never returning them.
 func TestDowngradeToOldBinary(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

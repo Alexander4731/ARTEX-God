@@ -557,12 +557,43 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["related_tasks"] = t.relatedTaskOverviews()
 	// coverage：粗略的资产测试覆盖度参考——范围(task_scope)内的资产里，被 fact 碰过的
 	// 占比 + by_type(按类型的 总数/已测)。要看未测的具体资产由 agent 按需调 list_untested_assets 自行判断。仅任务上下文有。
-	// 资产覆盖度功能关闭时(coverageDisabled)：只保留 host_count(目标主机数的感知信息)，
-	// 丢弃 denominator/tested/pct/by_type/note 等覆盖度度量，避免污染上下文、也不诱导
-	// 已隐藏的 add_task_scope/list_untested_assets。
+	// 资产覆盖度关闭时保留任务范围和 host_count，仅省略覆盖度度量。
 	if t.as != nil && t.ts != nil && t.taskID > 0 {
 		{
 			m := map[string]any{}
+			if scope, err := t.as.ListTaskScope(t.taskID); err == nil {
+				rows := make([]map[string]any, 0, len(scope))
+				for _, row := range scope {
+					entry := map[string]any{"kind": row.Kind, "source": row.Source}
+					switch {
+					case row.Domain != "":
+						entry["value"] = row.Domain
+					case row.Net != "":
+						entry["value"] = row.Net
+					case row.Value != "":
+						entry["value"] = row.Value
+					case row.CompanyID != nil:
+						entry["company_id"] = *row.CompanyID
+						entry["company_name"] = row.CompanyName
+						if t.cs != nil {
+							if rules, err := t.cs.GetScope(*row.CompanyID); err == nil {
+								companyScope := make([]map[string]any, 0, len(rules))
+								keywords := []string{}
+								for _, rule := range rules {
+									companyScope = append(companyScope, map[string]any{"kind": rule.Kind, "value": rule.Raw})
+									if rule.Kind == "keyword" {
+										keywords = append(keywords, rule.Raw)
+									}
+								}
+								entry["company_scope"] = companyScope
+								entry["company_keywords"] = keywords
+							}
+						}
+					}
+					rows = append(rows, entry)
+				}
+				m["scope"] = rows
+			}
 			if !t.coverageDisabled {
 				if cov, err := t.as.TaskCoverageWithSources(t.taskID); err == nil {
 					m["denominator"] = cov.Denominator

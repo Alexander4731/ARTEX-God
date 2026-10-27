@@ -23,7 +23,7 @@ export function FindingLineageView({ findingId }: { findingId: string }) {
         setNodes(g.nodes ?? []);
         setEdges(g.edges ?? []);
       })
-      .catch(() => {})
+      .catch(() => { /* Lineage is optional; keep the finding detail available. */ })
       .finally(() => {
         if (alive) setLoaded(true);
       });

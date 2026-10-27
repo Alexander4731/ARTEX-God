@@ -173,7 +173,7 @@ function InterceptPendingBadge() {
         if (live) setCount(list.length);
       } catch { /* ignore */ }
     }
-    poll();
+    void poll();
     const t = setInterval(poll, 5000);
     return () => { live = false; clearInterval(t); };
   }, []);

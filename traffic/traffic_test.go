@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/artex/internal/testutil"
+
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
 
@@ -30,7 +32,7 @@ func TestRequestHeaderLinesIncludesHost(t *testing.T) {
 // substring are removed together with their file trees, non-matching hosts are
 // untouched, and the count is right.
 func TestDeleteHost(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -95,7 +97,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 // TestHosts verifies the target picker contract: distinct hosts with counts,
 // most recent activity first.
 func TestHosts(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -132,7 +134,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 // host whose name contains another as a substring is untouched — duplicates in
 // the batch are harmless, and the per-host trees are removed.
 func TestDeleteHostsExact(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -181,7 +183,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 }
 
 func TestDeleteHostsExactReportsTreeRemovalFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -215,7 +217,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`,
 }
 
 func TestDeleteHostsExactRollsBackWholeIndexBatch(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -252,7 +254,7 @@ WHEN OLD.host='b.example.com' BEGIN SELECT RAISE(ABORT, 'forced delete failure')
 }
 
 func TestStageDeleteHostsExactRollbackRestoresIndexAndTree(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -297,7 +299,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)`, id, 1, host, "GET", "/", "http://"+host+"/", 200
 }
 
 func TestStageDeleteHostsExactRollbackReportsRestoreFailure(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -330,7 +332,7 @@ func TestStageDeleteHostsExactRollbackReportsRestoreFailure(t *testing.T) {
 // are removed, blobs referenced by no remaining exchange are deleted, while
 // blobs still referenced (including shared ones) survive.
 func TestDeleteHostGCBlobs(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/testutil"
 	"github.com/Autumn-27/artex/traffic"
 )
 
@@ -34,12 +35,16 @@ func evidenceFixture(t *testing.T) (*Store, db.RecordFindingInput, string) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { pg.DeleteFindingsByTask(task.ID); pg.DeleteTask(task.ID) })
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := traffic.Open(filepath.Join(dir, "traffic"), ":0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { tr.Close() })
+	t.Cleanup(func() {
+		if err := tr.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	store := New(pg, tr, filepath.Join(dir, "evidence"))
 	in := db.RecordFindingInput{TaskID: task.ID, ExplorationID: task.ExplorationID, Worker: "test", VulnClass: "TEST", Name: "Evidence fixture", Severity: "low", Summary: "local test"}
 	return store, in, dir

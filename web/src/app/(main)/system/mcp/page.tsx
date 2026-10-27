@@ -44,6 +44,7 @@ const emptyForm: FormState = {
 };
 
 export default function MCPPage() {
+  const controlId = React.useId();
   const [servers, setServers] = React.useState<MCPServer[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [visibility, setVisibility] = React.useState<Record<number, string[]>>({});
@@ -58,19 +59,19 @@ export default function MCPPage() {
   const [refreshing, setRefreshing] = React.useState(false);
 
   const load = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => {});
+    api.agents().then(setAgents).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
     api
       .mcpServers()
       .then((ss) => {
         setServers(ss);
-        ss.forEach((s) =>
+        ss.forEach((s) => {
           api
             .resourceVisibility("mcp", s.id)
             .then((ids) => setVisibility((v) => ({ ...v, [s.id]: ids })))
-            .catch(() => {}),
-        );
+            .catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
+        });
       })
-      .catch(() => {});
+      .catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
   }, []);
   React.useEffect(() => {
     load();
@@ -120,7 +121,7 @@ export default function MCPPage() {
     });
     setTab("config");
     setOpen(true);
-    loadTools(s.id);
+    void loadTools(s.id);
   }
 
   async function loadTools(id: number) {
@@ -299,8 +300,8 @@ export default function MCPPage() {
               value={form.url}
               onChange={(e) => setF({ url: e.target.value })}
             />
-            <label className="flex items-center gap-2 text-sm">
-              <Checkbox
+            <label htmlFor={`${controlId}-tls`} className="flex items-center gap-2 text-sm">
+              <Checkbox id={`${controlId}-tls`}
                 checked={form.insecure}
                 onCheckedChange={(v) => setF({ insecure: v === true })}
               />
@@ -379,9 +380,14 @@ export default function MCPPage() {
         {servers.map((s) => (
           <Card
             key={s.id}
-            onClick={() => openEdit(s)}
-            className="hover:border-primary/60 cursor-pointer gap-3 transition hover:shadow-sm"
+            className="hover:border-primary/60 relative gap-3 transition hover:shadow-sm"
           >
+            <button
+              type="button"
+              aria-label={`编辑 MCP ${s.name}`}
+              onClick={() => openEdit(s)}
+              className="absolute inset-0 cursor-pointer rounded-xl focus-visible:outline-2 focus-visible:outline-ring"
+            />
             <CardHeader>
               <div className="flex items-center gap-2">
                 <ServerIcon className="text-muted-foreground size-4 shrink-0" />
@@ -389,7 +395,7 @@ export default function MCPPage() {
                 <Badge variant="outline" className="uppercase">
                   {s.transport}
                 </Badge>
-                <div className="ml-auto flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                <div className="relative z-10 ml-auto flex items-center gap-2">
                   <Switch
                     checked={s.enabled}
                     onCheckedChange={() => toggleEnabled(s)}
@@ -410,12 +416,12 @@ export default function MCPPage() {
               <p className="text-muted-foreground text-sm">
                 {s.tools && s.tools.length > 0 ? `${s.tools.length} 个工具` : "尚未发现工具"}
               </p>
-              <div className="grid gap-2" onClick={(e) => e.stopPropagation()}>
+              <div className="relative z-10 grid gap-2">
                 <span className="text-muted-foreground text-xs">可见性（按 Agent 授权）</span>
                 <div className="flex flex-wrap gap-x-4 gap-y-2">
                   {agents.map((a) => (
-                    <label key={a.key} className="flex items-center gap-2 text-sm">
-                      <Checkbox
+                    <label htmlFor={`${controlId}-visibility-${s.id}-${a.id}`} key={a.key} className="flex items-center gap-2 text-sm">
+                      <Checkbox id={`${controlId}-visibility-${s.id}-${a.id}`}
                         checked={(visibility[s.id] ?? []).includes(a.id)}
                         onCheckedChange={() => toggleVisibility(s.id, a.id, a.name)}
                       />

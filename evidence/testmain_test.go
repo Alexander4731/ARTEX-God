@@ -2,14 +2,15 @@ package evidence
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
 )
 
-// Initialize an explicitly configured fresh database before taking the same
-// suite lock as db, agent and server. Hold it on one pinned connection.
+// Take the shared suite lock before any schema initialization, which otherwise
+// races with db, agent and server tests. Hold it on one pinned connection.
 func TestMain(m *testing.M) {
 	if os.Getenv("ARTEX_PG_DSN") == "" {
 		os.Exit(m.Run())
@@ -17,7 +18,7 @@ func TestMain(m *testing.M) {
 	os.Exit(runEvidenceSuite(m))
 }
 func runEvidenceSuite(m *testing.M) int {
-	pg, err := db.Open(os.Getenv("ARTEX_PG_DSN"))
+	pg, err := sql.Open("pgx", os.Getenv("ARTEX_PG_DSN"))
 	if err != nil {
 		panic(err)
 	}
@@ -31,5 +32,10 @@ func runEvidenceSuite(m *testing.M) int {
 		panic(err)
 	}
 	defer conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock(7337741002)`)
+	initialized, err := db.Open(os.Getenv("ARTEX_PG_DSN"))
+	if err != nil {
+		panic(err)
+	}
+	defer initialized.Close()
 	return m.Run()
 }

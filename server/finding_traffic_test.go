@@ -17,16 +17,21 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/testutil"
 	"github.com/Autumn-27/artex/traffic"
 )
 
 func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(string, string, string) *httptest.ResponseRecorder) {
 	t.Helper()
-	m, err := NewManager(t.TempDir(), "")
+	m, err := NewManager(testutil.TempDir(t), "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Close() })
+	t.Cleanup(func() {
+		if err := m.Close(); err != nil {
+			t.Error(err)
+		}
+	})
 	m.traffic, err = traffic.Open(filepath.Join(m.dir, "traffic"), ":0")
 	if err != nil {
 		t.Fatal(err)

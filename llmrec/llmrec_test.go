@@ -2,6 +2,7 @@ package llmrec
 
 import (
 	"context"
+	"database/sql"
 	"iter"
 	"os"
 	"testing"
@@ -87,11 +88,24 @@ func TestSideUsageRecordedOnceOnConsumerCancellation(t *testing.T) {
 	if dsn == "" {
 		t.Skip("requires isolated ARTEX_PG_DSN")
 	}
+	// Schema initialization must hold the same lock as the db/agent/server suites.
+	lock, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.SetMaxOpenConns(1)
+	defer lock.Close()
+	if _, err := lock.ExecContext(t.Context(), `SELECT pg_advisory_lock(7337741002)`); err != nil {
+		t.Fatal(err)
+	}
 	pg, err := db.Open(dsn)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer pg.Close()
+	if err := pg.EnsureLLMUsageTable(); err != nil {
+		t.Fatal(err)
+	}
 	for _, early := range []bool{false, true} {
 		profile := "btw-metering-" + uuid.NewString()
 		ctx, cancel := context.WithCancel(transcript.WithSessionID(t.Context(), "exp0-btw-test"))

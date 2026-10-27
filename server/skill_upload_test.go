@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -61,6 +62,42 @@ func TestSkillRelPath(t *testing.T) {
 		if got, msg := skillRelPath(in); msg == "" {
 			t.Errorf("skillRelPath(%q) = (%q, \"\"), want rejection", in, got)
 		}
+	}
+}
+
+func TestSkillFileListingPaths(t *testing.T) {
+	s := &Server{skillDir: t.TempDir()}
+	root := filepath.Join(s.skillDir, "listing-test")
+	for _, dir := range []string{"docs/nested", "empty"} {
+		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(root, "docs/nested/readme.txt"), []byte("nested content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/", nil)
+	r.SetPathValue("name", "listing-test")
+	w := httptest.NewRecorder()
+	s.fsListFiles(w, r)
+	var listing struct{ Files []string }
+	if err := json.Unmarshal(w.Body.Bytes(), &listing); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("list: status=%d err=%v", w.Code, err)
+	}
+	want := []string{"docs/", "docs/nested/", "docs/nested/readme.txt", "empty/"}
+	if !slices.Equal(listing.Files, want) {
+		t.Fatalf("listed paths: %q, want %q", listing.Files, want)
+	}
+	// Feed the listed nested path directly back into the file API, as the UI does.
+	r.SetPathValue("file", listing.Files[2])
+	w = httptest.NewRecorder()
+	s.fsReadFile(w, r)
+	var file struct{ Content, File string }
+	if err := json.Unmarshal(w.Body.Bytes(), &file); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("read: status=%d err=%v", w.Code, err)
+	}
+	if file.Content != "nested content" || file.File != listing.Files[2] {
+		t.Fatalf("read listed file: %+v", file)
 	}
 }
 

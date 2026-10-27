@@ -294,6 +294,7 @@ function SkillsOverview({
 
 // ── Page ──────────────────────────────────────────────────────────────────
 export default function SkillsPage() {
+  const controlId = React.useId();
   const [skills, setSkills] = React.useState<SkillItem[]>([]);
   const [agents, setAgents] = React.useState<Agent[]>([]);
   const [selected, setSelected] = React.useState<Selected | null>(null);
@@ -342,17 +343,17 @@ export default function SkillsPage() {
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const load = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => {});
-    api.mcpServers().then(setMcpOptions).catch(() => {});
-    api.missingSkills().then(setMissing).catch(() => {});
+    api.agents().then(setAgents).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
+    api.mcpServers().then(setMcpOptions).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
+    api.missingSkills().then(setMissing).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
     api.skills().then((ss) => {
       setSkills(ss);
-      ss.forEach((s) =>
+      ss.forEach((s) => {
         api.skillVisibility(s.name)
           .then((ids) => setVisibility((v) => ({ ...v, [s.name]: ids })))
-          .catch(() => {}),
-      );
-    }).catch(() => {});
+          .catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
+      });
+    }).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
   }, []);
 
   React.useEffect(() => { load(); }, [load]);
@@ -382,7 +383,7 @@ export default function SkillsPage() {
   function onUploadPick(e: React.ChangeEvent<HTMLInputElement>) {
     const f = e.target.files?.[0];
     e.target.value = ""; // reset so picking the same file again re-fires
-    if (f) uploadZip(f);
+    if (f) void uploadZip(f);
   }
 
   React.useEffect(() => {
@@ -632,16 +633,22 @@ export default function SkillsPage() {
             <div
               className="group relative flex cursor-pointer select-none items-center gap-1 rounded py-0.5 pr-1 text-sm hover:bg-muted"
               style={{ paddingLeft: baseIndent }}
-              onClick={() => toggleExpanded(key)}
             >
-              <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
-              {open
-                ? <FolderOpenIcon className="size-3.5 shrink-0 text-amber-500" />
-                : <FolderIcon className="size-3.5 shrink-0 text-amber-500" />
-              }
-              <span className="min-w-0 flex-1 truncate" title={node.path}>{node.name}</span>
+              <button
+                type="button"
+                className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                aria-expanded={open}
+                onClick={() => toggleExpanded(key)}
+              >
+                <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform", open && "rotate-90")} />
+                {open
+                  ? <FolderOpenIcon className="size-3.5 shrink-0 text-amber-500" />
+                  : <FolderIcon className="size-3.5 shrink-0 text-amber-500" />
+                }
+                <span className="min-w-0 flex-1 truncate" title={node.path}>{node.name}</span>
+              </button>
               {/* Absolute so a long name can never push the actions out of view */}
-              <span className="absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded bg-muted pl-1 group-hover:flex">
+              <span className="absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded bg-muted pl-1 group-hover:flex group-focus-within:flex">
                 <Button size="icon" variant="ghost" className="size-5" title="新建文件"
                   onClick={(e) => { e.stopPropagation(); startCreate(skill, node.path, "file"); }}>
                   <FilePlusIcon className="size-3 text-muted-foreground" />
@@ -677,12 +684,18 @@ export default function SkillsPage() {
             isSelected ? "bg-accent text-accent-foreground" : "hover:bg-muted",
           )}
           style={{ paddingLeft: baseIndent + 16 }}
-          onClick={() => setSelected({ skill, path: node.path })}
         >
-          <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
-          <span className="min-w-0 flex-1 truncate font-mono text-xs" title={node.path}>{node.name}</span>
+          <button
+            type="button"
+            className="flex min-w-0 flex-1 items-center gap-1 text-left"
+            aria-pressed={isSelected}
+            onClick={() => setSelected({ skill, path: node.path })}
+          >
+            <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate font-mono text-xs" title={node.path}>{node.name}</span>
+          </button>
           <span className={cn(
-            "absolute inset-y-0 right-1 hidden items-center rounded pl-1 group-hover:flex",
+            "absolute inset-y-0 right-1 hidden items-center rounded pl-1 group-hover:flex group-focus-within:flex",
             isSelected ? "bg-accent" : "bg-muted",
           )}>
             <Button size="icon" variant="ghost" className="size-5"
@@ -776,27 +789,34 @@ export default function SkillsPage() {
                         "group relative flex cursor-pointer select-none items-center gap-1 rounded px-2 py-1 text-sm",
                         isSkillSelected ? "bg-accent text-accent-foreground" : "hover:bg-muted",
                       )}
-                      onClick={() => {
-                        toggleExpanded(s.name);
-                        setSelected({ skill: s.name, path: null });
-                      }}
                     >
-                      <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
-                      {isOpen
-                        ? <FolderOpenIcon className="size-3.5 shrink-0 text-blue-500" />
-                        : <FolderIcon className="size-3.5 shrink-0 text-blue-500" />
-                      }
-                      <span className="min-w-0 flex-1 truncate font-semibold" title={s.name}>{s.name}</span>
-                      {s.calls > 0 && (
-                        <span
-                          className="shrink-0 rounded bg-muted px-1 text-[10px] tabular-nums text-muted-foreground"
-                          title={`被调用 ${s.calls} 次 · 最近 ${fmtTime(s.last_used)}`}
-                        >
-                          {s.calls}
-                        </span>
-                      )}
+                      <button
+                        type="button"
+                        className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                        aria-expanded={isOpen}
+                        aria-pressed={isSkillSelected}
+                        onClick={() => {
+                          toggleExpanded(s.name);
+                          setSelected({ skill: s.name, path: null });
+                        }}
+                      >
+                        <ChevronRightIcon className={cn("size-3.5 shrink-0 transition-transform", isOpen && "rotate-90")} />
+                        {isOpen
+                          ? <FolderOpenIcon className="size-3.5 shrink-0 text-blue-500" />
+                          : <FolderIcon className="size-3.5 shrink-0 text-blue-500" />
+                        }
+                        <span className="min-w-0 flex-1 truncate font-semibold" title={s.name}>{s.name}</span>
+                        {s.calls > 0 && (
+                          <span
+                            className="shrink-0 rounded bg-muted px-1 text-[10px] tabular-nums text-muted-foreground"
+                            title={`被调用 ${s.calls} 次 · 最近 ${fmtTime(s.last_used)}`}
+                          >
+                            {s.calls}
+                          </span>
+                        )}
+                      </button>
                       <span className={cn(
-                        "absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded pl-1 group-hover:flex",
+                        "absolute inset-y-0 right-1 hidden items-center gap-0.5 rounded pl-1 group-hover:flex group-focus-within:flex",
                         isSkillSelected ? "bg-accent" : "bg-muted",
                       )}>
                         <Button size="icon" variant="ghost" className="size-5" title="新建文件"
@@ -925,8 +945,8 @@ export default function SkillsPage() {
                     ) : (
                       <div className="flex flex-wrap gap-x-4 gap-y-2">
                         {mcpOptions.map((m) => (
-                          <label key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                            <Checkbox
+                          <label htmlFor={`${controlId}-detail-mcp-${m.id}`} key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                            <Checkbox id={`${controlId}-detail-mcp-${m.id}`}
                               checked={detailMcps.includes(m.name)}
                               onCheckedChange={(on) => toggleSkillMcp(selectedSkill.name, m.name, !!on)}
                             />
@@ -941,8 +961,8 @@ export default function SkillsPage() {
                     <Label className="text-xs text-muted-foreground">可见性（按 Agent 授权）</Label>
                     <div className="space-y-2">
                       {agents.map((a) => (
-                        <label key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
-                          <Checkbox
+                        <label htmlFor={`${controlId}-detail-agent-${a.id}`} key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
+                          <Checkbox id={`${controlId}-detail-agent-${a.id}`}
                             checked={(visibility[selectedSkill.name] ?? []).includes(a.id)}
                             onCheckedChange={() => toggleVisibility(selectedSkill.name, a.id, a.name)}
                           />
@@ -1079,8 +1099,8 @@ export default function SkillsPage() {
               ) : (
                 <div className="flex flex-col gap-2">
                   {mcpOptions.map((m) => (
-                    <label key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox
+                    <label htmlFor={`${controlId}-new-mcp-${m.id}`} key={m.id} className="flex cursor-pointer items-center gap-2 text-sm">
+                      <Checkbox id={`${controlId}-new-mcp-${m.id}`}
                         checked={newMcps.includes(m.name)}
                         onCheckedChange={(on) =>
                           setNewMcps((cur) => on ? [...cur, m.name] : cur.filter((n) => n !== m.name))
@@ -1101,8 +1121,8 @@ export default function SkillsPage() {
               ) : (
                 <div className="flex flex-col gap-2">
                   {agents.map((a) => (
-                    <label key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
-                      <Checkbox
+                    <label htmlFor={`${controlId}-new-agent-${a.id}`} key={a.key} className="flex cursor-pointer items-center gap-2 text-sm">
+                      <Checkbox id={`${controlId}-new-agent-${a.id}`}
                         checked={newVisibility.includes(a.id)}
                         onCheckedChange={(on) =>
                           setNewVisibility((cur) => on ? [...cur, a.id] : cur.filter((id) => id !== a.id))

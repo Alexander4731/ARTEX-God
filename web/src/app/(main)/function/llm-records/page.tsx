@@ -168,7 +168,7 @@ export default function LLMRecordsPage() {
     api
       .settings()
       .then((s) => { if (alive) setRecEnabled(!!s.llm_record); })
-      .catch(() => {});
+      .catch(() => { /* Keep the last known recording state if settings cannot be read. */ });
     return () => { alive = false; };
   }, []);
 
@@ -192,11 +192,13 @@ export default function LLMRecordsPage() {
   }, [session]);
 
   // Reset page on filter change.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Filter changes trigger pagination reset.
   React.useEffect(() => {
     setPage(0);
   }, [sessionQ, model, size, pickedTask]);
 
   // Load list.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: reloadTick explicitly refreshes the current query after deletion.
   React.useEffect(() => {
     let alive = true;
     setLoading(true);
@@ -207,12 +209,12 @@ export default function LLMRecordsPage() {
         setRecords(r.records ?? []);
         setTotal(r.total ?? 0);
       })
-      .catch(() => {})
+      .catch(() => { /* Retain the last loaded records on a failed refresh. */ })
       .finally(() => alive && setLoading(false));
     api
       .llmTasks()
       .then((r) => { if (alive) setTasks(r.tasks ?? []); })
-      .catch(() => {});
+      .catch(() => { /* Retain the task filter choices on a failed refresh. */ });
     return () => { alive = false; };
   }, [page, size, sessionQ, model, pickedTask, reloadTick]);
 
@@ -229,7 +231,7 @@ export default function LLMRecordsPage() {
         setPage(0);
         setReloadTick((t) => t + 1);
       })
-      .catch(() => {})
+      .catch((e) => alert((e as Error).message))
       .finally(() => setDeleting(false));
   };
 
@@ -245,7 +247,7 @@ export default function LLMRecordsPage() {
     api
       .llmRecordDetail(selected.id)
       .then((d) => { if (alive) setDetail(d); })
-      .catch(() => {})
+      .catch(() => { /* A missing detail leaves the list available for another selection. */ })
       .finally(() => { if (alive) setDetailLoading(false); });
     return () => { alive = false; };
   }, [selected]);

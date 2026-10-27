@@ -9,11 +9,12 @@ import (
 	"testing"
 
 	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/internal/testutil"
 	"github.com/klauspost/compress/zstd"
 )
 
 func TestTaskArchivePackageFilesRoundTrip(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := testutil.TempDir(t)
 	taskID := "42"
 	explorationID := int64(73)
 	taskFile := filepath.Join(dataDir, "tasks", taskID, "uploads", "evidence.txt")

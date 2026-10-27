@@ -1,6 +1,7 @@
 package intercept
 
 import (
+	"database/sql"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -10,6 +11,16 @@ func TestToolConfigRoundTripPreservesDynamicDefaults(t *testing.T) {
 	dsn, _, err := db.DSN()
 	if err != nil {
 		t.Skip("test PostgreSQL not configured")
+	}
+	// Serialize schema initialization and settings cleanup with the other PG suites.
+	lock, err := sql.Open("pgx", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lock.SetMaxOpenConns(1)
+	t.Cleanup(func() { lock.Close() })
+	if _, err := lock.ExecContext(t.Context(), `SELECT pg_advisory_lock(7337741002)`); err != nil {
+		t.Fatal(err)
 	}
 	d, err := db.Open(dsn)
 	if err != nil {

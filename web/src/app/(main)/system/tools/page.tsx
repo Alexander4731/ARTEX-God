@@ -154,6 +154,7 @@ function ToolEditor({
   onSaved: () => void;
   onClose: () => void;
 }) {
+  const controlId = React.useId();
   // traffic tools can't be bound/enabled until the global 流量捕获 switch is on.
   const trafficGated = TRAFFIC_TOOL_KEYS.has(tool.key) && !captureOn;
   const [description, setDescription] = React.useState(tool.description);
@@ -210,8 +211,8 @@ function ToolEditor({
             <Label className="text-muted-foreground text-xs">绑定 Agent（决定该工具给哪些 Agent）</Label>
             <div className="flex flex-wrap gap-3">
               {agents.map((ag) => (
-                <label key={ag.key} className="flex items-center gap-2 text-sm">
-                  <Checkbox
+                <label htmlFor={`${controlId}-agent-${ag.key}`} key={ag.key} className="flex items-center gap-2 text-sm">
+                  <Checkbox id={`${controlId}-agent-${ag.key}`}
                     checked={bound.includes(ag.key)}
                     disabled={trafficGated}
                     onCheckedChange={() => toggleAgent(ag.key)}
@@ -375,8 +376,8 @@ export default function ToolsPage() {
   }, []);
   React.useEffect(() => {
     reload();
-    api.agents().then(setAgents).catch(() => {});
-    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => {});
+    api.agents().then(setAgents).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
+    api.settings().then((s) => setCaptureOn(!!s.traffic_capture)).catch(() => { /* Retain the current choices when this refresh is unavailable. */ });
   }, [reload]);
 
   const [query, setQuery] = React.useState("");
@@ -544,6 +545,7 @@ function CustomToolDialog({
   onClose: () => void;
   onSaved: () => void;
 }) {
+  const controlId = React.useId();
   const isNew = edit === "new";
   const tool = edit && edit !== "new" ? edit : null;
   const [key, setKey] = React.useState("");
@@ -750,8 +752,8 @@ function CustomToolDialog({
                   <Label className="text-xs">代理 URL（空=直连）</Label>
                   <Input className="font-mono text-xs w-56" value={ex.proxy} onChange={(e) => setEx({ ...ex, proxy: e.target.value })} />
                 </div>
-                <label className="mt-4 flex items-center gap-2 text-sm">
-                  <Checkbox checked={ex.use_recording_proxy} onCheckedChange={(v) => setEx({ ...ex, use_recording_proxy: !!v })} />
+                <label htmlFor={`${controlId}-recording`} className="mt-4 flex items-center gap-2 text-sm">
+                  <Checkbox id={`${controlId}-recording`} checked={ex.use_recording_proxy} onCheckedChange={(v) => setEx({ ...ex, use_recording_proxy: !!v })} />
                   走记录代理
                 </label>
               </div>
@@ -782,8 +784,8 @@ function CustomToolDialog({
             <Label className="text-muted-foreground text-xs">绑定 Agent</Label>
             <div className="flex flex-wrap gap-3">
               {agents.map((a) => (
-                <label key={a.key} className="flex items-center gap-2 text-sm">
-                  <Checkbox checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
+                <label htmlFor={`${controlId}-agent-${a.key}`} key={a.key} className="flex items-center gap-2 text-sm">
+                  <Checkbox id={`${controlId}-agent-${a.key}`} checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
                   {a.name}<span className="text-muted-foreground font-mono text-xs">{a.key}</span>
                 </label>
               ))}
@@ -791,12 +793,12 @@ function CustomToolDialog({
           </div>
 
           <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={enabled} onCheckedChange={setEnabled} /> 启用
+            <label htmlFor={`${controlId}-enabled`} className="flex items-center gap-2 text-sm">
+              <Switch id={`${controlId}-enabled`} checked={enabled} onCheckedChange={setEnabled} /> 启用
             </label>
             {kind !== "shell" && (
-              <label className="flex items-center gap-2 text-sm">
-                <Switch checked={deferred} onCheckedChange={setDeferred} /> deferred（大量不常用工具才开）
+              <label htmlFor={`${controlId}-deferred`} className="flex items-center gap-2 text-sm">
+                <Switch id={`${controlId}-deferred`} checked={deferred} onCheckedChange={setDeferred} /> deferred（大量不常用工具才开）
               </label>
             )}
           </div>

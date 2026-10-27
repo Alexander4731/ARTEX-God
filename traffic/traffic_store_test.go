@@ -10,6 +10,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/Autumn-27/artex/internal/testutil"
+
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
 
@@ -49,7 +51,7 @@ func newFlow(host, method, path string, reqBody, respBody []byte, opts ...flowOp
 
 func openTraffic(t *testing.T) (*Traffic, string) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	tr, err := Open(dir, "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)

@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/internal/testutil"
 )
 
 // bulkRecord fills the index with inline bodies — the ones that actually make
@@ -111,7 +113,7 @@ func TestReclaimMergesFTSTombstones(t *testing.T) {
 // no-op there, so reclamation must report the situation and finish rather than
 // spin or fail. Only a full compaction can convert such a file.
 func TestReclaimOnLegacyIndexIsHarmless(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	if err := os.MkdirAll(filepath.Join(dir, "_index"), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -222,7 +224,7 @@ func TestDeleteAllPurgesAndCompacts(t *testing.T) {
 // VACUUM, and an emptied index is the cheapest place to pay for one. After this,
 // ordinary deletions reclaim space on their own.
 func TestDeleteAllConvertsLegacyIndex(t *testing.T) {
-	dir := t.TempDir()
+	dir := testutil.TempDir(t)
 	old := openLegacyIndex(t, dir)
 	if err := old.Close(); err != nil {
 		t.Fatal(err)
