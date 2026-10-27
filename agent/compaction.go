@@ -33,17 +33,20 @@ import (
 
 // Compactor performs background cold-node compaction for many explorations.
 type Compactor struct {
-	prov     llm.Provider
-	model    string
-	params   coldParams
-	n, m     int           // minor / major thresholds (§7 N=20, M=8)
-	cooldown time.Duration // min gap between compactions per task (§7 60s)
-	maxDur   time.Duration // hard cap on one background compaction
+	background func(func()) bool
+	prov       llm.Provider
+	model      string
+	params     coldParams
+	n, m       int           // minor / major thresholds (§7 N=20, M=8)
+	cooldown   time.Duration // min gap between compactions per task (§7 60s)
+	maxDur     time.Duration // hard cap on one background compaction
 
 	mu      sync.Mutex
 	running map[int64]bool
 	lastRun map[int64]time.Time
 }
+
+func (c *Compactor) SetBackgroundRunner(run func(func()) bool) { c.background = run }
 
 // NewCompactor builds a compactor. prov/model are used for the §4 body LLM call
 // (same model the agent runs on, per §4). A nil Compactor is a safe no-op.
@@ -82,9 +85,9 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 	if !c.tryStart(ts.ID()) {
 		return // already running, or within cooldown —派生态最终一致，下轮再压
 	}
-	go func() {
+	run := func() {
 		defer c.finish(ts.ID())
-		bg, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.maxDur)
+		bg, cancel := context.WithTimeout(ctx, c.maxDur)
 		defer cancel()
 		// 压缩是裸 provider 调用（compress 里直接 prov.Complete），不经过 agentcore
 		// 的会话循环，所以 ctx 上没有 session id；按 session-id 头做提示缓存/粘性
@@ -97,7 +100,14 @@ func (c *Compactor) OnPlannerRound(ctx context.Context, ts *db.ExplorationStore)
 		} else {
 			c.minor(bg, ts)
 		}
-	}()
+	}
+	if c.background != nil {
+		if !c.background(run) {
+			c.finish(ts.ID())
+		}
+	} else {
+		go run()
+	}
 	_ = round
 }
 

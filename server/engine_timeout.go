@@ -50,7 +50,7 @@ func (e *Engine) inflightCounter(taskID string) *int64 {
 func (e *Engine) beginTaskOperation(taskID string) bool {
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
-	if e.IsDeleting(taskID) {
+	if e.stopping || e.IsDeleting(taskID) {
 		return false
 	}
 	atomic.AddInt64(e.inflightCounter(taskID), 1)
@@ -116,6 +116,7 @@ func (e *Engine) stampFirstRun(t *Task) {
 // worker/planner can clamp their wall-clock budget and pick per-run vs task-timeout
 // wrap-up words. final marks the coordinator-driven terminal planner round.
 func (e *Engine) clockCtx(base context.Context, t *Task, final bool) context.Context {
+	base = e.phaseContext(base, t.ID)
 	dl := e.taskDeadline(t)
 	if dl <= 0 && !final {
 		return base // no timeout → unchanged behavior
@@ -133,7 +134,7 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 		return
 	}
 	e.deleteMu.RLock()
-	if e.IsDeleting(t.ID) {
+	if e.stopping || ctx.Err() != nil || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
 		return
 	}
@@ -203,7 +204,12 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	}
 
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
-	met := e.runFinalPlannerRound(ctx, t)
+	met := false
+	if e.inflightCount(t.ID) == 0 && ctx.Err() == nil {
+		finalCtx, cancel := context.WithTimeout(ctx, settleDrainGrace)
+		met = e.runFinalPlannerRound(finalCtx, t)
+		cancel()
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return
 	}
@@ -215,7 +221,15 @@ func (e *Engine) settleTask(ctx context.Context, t *Task) {
 	if met {
 		status = "done"
 	}
-	won, err := e.m.SetTaskStatusGuarded(t.ID, status)
+	var won bool
+	var err error
+	for {
+		won, err = e.m.SetTaskStatusGuarded(t.ID, status)
+		if err == nil || sleepCtx(ctx, time.Second) {
+			break
+		}
+		log.Printf("[deadline] task %s 等待终态提交: %v", t.ID, err)
+	}
 	switch {
 	case err != nil:
 		log.Printf("[deadline] task %s 落终态失败: %v", t.ID, err)
@@ -256,13 +270,15 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task) (met bool) {
 	e.emitActivity(t, db.Activity{Worker: "planner", Kind: "round",
 		Summary: fmt.Sprintf("任务超时收尾·终局判定(第 %d 轮)", e.nextPlannerRound(t.ID))})
 	tTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	e.BeginLLMCall(t.ID)
 	met, reason, err := planner.Plan(fctx, tTaskID, e.m.assets, t.Store, t.Goal, t.drainTriggers(), emit)
-	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)
 	} else if met {
 		log.Printf("[deadline] task %s 终局判定目标达成: %s", t.ID, reason)
 	}
-	return met
+	if err != nil || !met {
+		return false
+	}
+	verified, err := t.Store.AllGoalsMet()
+	return err == nil && verified
 }

@@ -214,6 +214,9 @@ BEGIN
             CHECK (kind IN ('begin','goal','intent','fact','finding','hint','digest'));
     END IF;
 END $$;
+
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS planner_todos JSONB NOT NULL DEFAULT '[]'::jsonb;
+ALTER TABLE explorations ADD COLUMN IF NOT EXISTS planner_todo_revision BIGINT NOT NULL DEFAULT 0;
 -- ck_node_state: recreate when it lacks the 'paused' (older), 'superseded' (digest rev),
 -- or 'deleted' (intent soft-delete rev) branches.
 DO $$
@@ -1384,3 +1387,14 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema()
+                   AND table_name='tasks' AND column_name='bootstrap_complete') THEN
+        ALTER TABLE tasks ADD COLUMN bootstrap_complete BOOLEAN NOT NULL DEFAULT TRUE;
+        UPDATE tasks t SET bootstrap_complete=FALSE
+        WHERE status NOT IN ('done','failed','timeout')
+          AND NOT EXISTS (SELECT 1 FROM exploration_nodes n WHERE n.exploration_id=t.exploration_id
+                          AND n.kind IN ('goal','intent'));
+    END IF;
+END $$;

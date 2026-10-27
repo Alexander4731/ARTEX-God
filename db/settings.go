@@ -1,6 +1,49 @@
 package db
 
-import "database/sql"
+import (
+	"database/sql"
+	"sort"
+)
+
+// GetSettings reads a group of settings from a single database snapshot.
+func (d *DB) GetSettings(keys []string) (map[string]string, error) {
+	rows, err := d.Query(`SELECT key, value FROM settings WHERE key = ANY($1)`, keys)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	values := make(map[string]string, len(keys))
+	for rows.Next() {
+		var key, value string
+		if err := rows.Scan(&key, &value); err != nil {
+			return nil, err
+		}
+		values[key] = value
+	}
+	return values, rows.Err()
+}
+
+// SetSettings atomically replaces related settings. Stable lock order also
+// prevents concurrent updates of overlapping groups from deadlocking.
+func (d *DB) SetSettings(values map[string]string) error {
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	keys := make([]string, 0, len(values))
+	for key := range values {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	for _, key := range keys {
+		if _, err := tx.Exec(`INSERT INTO settings(key,value) VALUES($1,$2)
+ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()`, key, values[key]); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
 
 // Settings is a tiny key-value store for global app config the UI toggles at
 // runtime (e.g. traffic_capture). Missing keys fall back to caller defaults.

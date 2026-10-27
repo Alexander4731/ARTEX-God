@@ -7,6 +7,8 @@ import (
 	"log"
 	"runtime/debug"
 
+	"github.com/Autumn-27/artex/guard"
+	"github.com/Autumn-27/artex/intercept"
 	actool "github.com/Autumn-27/norma/tool"
 )
 
@@ -76,7 +78,16 @@ func guardPanic(t actool.CoreTool) actool.CoreTool { return &guardedTool{CoreToo
 
 type guardedTool struct{ actool.CoreTool }
 
+func (g *guardedTool) ReviewInput(in json.RawMessage) (json.RawMessage, bool, error) {
+	return guard.DescribeInput(g.CoreTool, in)
+}
+
 func (g *guardedTool) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (res actool.Result, err error) {
+	if ctx.Err() != nil {
+		return actool.Result{}, ctx.Err()
+	}
+	finish := intercept.BeginPhase(ctx, "tool")
+	defer finish()
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[tools] %s panic: %v\n%s", g.Name(), r, debug.Stack())

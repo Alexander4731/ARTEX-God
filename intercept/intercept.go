@@ -141,6 +141,7 @@ func (i *Interceptor) SetReviewer(r Reviewer) {
 // defaultEnabledTools is the hard-coded set of tools that enter the intercept
 // rule system when no intercept_enabled_tools setting has been saved.
 var defaultEnabledTools = []string{
+	"external:*",
 	"Bash", "WebFetch", "web_search",
 	"shell_open", "shell_send",
 	"Write", "Edit", "MultiEdit",
@@ -167,7 +168,7 @@ func (i *Interceptor) loadLocked() error {
 	if err != nil {
 		return err
 	}
-	var out []compiledRule
+	out := make([]compiledRule, 0, len(rules))
 	for _, r := range rules {
 		if !r.Enabled {
 			continue
@@ -176,16 +177,17 @@ func (i *Interceptor) loadLocked() error {
 		if r.MatchType == "regex" {
 			re, err := regexp.Compile(r.Pattern)
 			if err != nil {
-				continue // skip rules with bad regex rather than crashing
+				return fmt.Errorf("intercept rule %d: %w", r.ID, err)
 			}
 			cr.re = re
 		}
 		out = append(out, cr)
 	}
-	i.cached = out
-
 	// Load enabled-tools set from settings, falling back to hard-coded defaults.
-	val, ok, _ := i.db.GetSetting("intercept_enabled_tools")
+	val, ok, err := i.db.GetSetting("intercept_enabled_tools")
+	if err != nil {
+		return err
+	}
 	if !ok {
 		m := make(map[string]bool, len(defaultEnabledTools))
 		for _, n := range defaultEnabledTools {
@@ -194,8 +196,8 @@ func (i *Interceptor) loadLocked() error {
 		i.enabledTools = m
 	} else {
 		var names []string
-		if json.Unmarshal([]byte(val), &names) != nil {
-			i.enabledTools = map[string]bool{}
+		if err := json.Unmarshal([]byte(val), &names); err != nil {
+			return fmt.Errorf("intercept_enabled_tools: %w", err)
 		} else {
 			m := make(map[string]bool, len(names))
 			for _, n := range names {
@@ -204,6 +206,7 @@ func (i *Interceptor) loadLocked() error {
 			i.enabledTools = m
 		}
 	}
+	i.cached = out
 	return nil
 }
 
@@ -231,20 +234,30 @@ func (i *Interceptor) rules() ([]compiledRule, error) {
 // (i.e. it should enter the rule-matching path). Uses the same double-check lock
 // pattern as rules().
 func (i *Interceptor) IsToolEnabled(name string) bool {
+	enabled, err := i.CheckToolEnabled(name)
+	return err != nil || enabled
+}
+
+// CheckToolEnabled distinguishes an administrator's disabled tool from a
+// configuration that could not be loaded.
+func (i *Interceptor) CheckToolEnabled(name string, defaultEnabled ...bool) (bool, error) {
+	fallback := len(defaultEnabled) > 0 && defaultEnabled[0]
 	i.mu.RLock()
 	if i.enabledTools != nil {
-		v := i.enabledTools[name]
+		v := i.enabledTools[name] || (i.enabledTools["external:*"] && fallback)
 		i.mu.RUnlock()
-		return v
+		return v, nil
 	}
 	i.mu.RUnlock()
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.enabledTools == nil {
-		_ = i.loadLocked()
+		if err := i.loadLocked(); err != nil {
+			return false, err
+		}
 	}
-	return i.enabledTools[name]
+	return i.enabledTools[name] || (i.enabledTools["external:*"] && fallback), nil
 }
 
 // GetEnabledTools returns the ordered list of tool names that are currently
@@ -262,7 +275,7 @@ func (i *Interceptor) GetEnabledTools() ([]string, error) {
 	}
 	var names []string
 	if err := json.Unmarshal([]byte(val), &names); err != nil {
-		return []string{}, nil
+		return nil, err
 	}
 	return names, nil
 }
@@ -313,7 +326,7 @@ const (
 // Judge default values.
 const (
 	defaultJudgeTimeoutSecs      = 15
-	defaultJudgeFailAction       = "allow"
+	defaultJudgeFailAction       = "ask"
 	defaultJudgeAskTimeoutSecs   = 300
 	defaultJudgeAskTimeoutAction = "deny"
 )
@@ -333,17 +346,48 @@ type JudgeConfig struct {
 // judgeConfig reads the judge configuration from settings, applying defaults for
 // missing/invalid keys. Read fresh on each fallback judgement — the LLM call that
 // follows dwarfs a few KV reads, and freshness avoids a cache-invalidation path.
-func (i *Interceptor) judgeConfig() JudgeConfig {
+func (i *Interceptor) LoadJudgeConfig() (JudgeConfig, error) {
+	values, err := i.db.GetSettings([]string{settingJudgeEnabled, settingJudgeProfileID,
+		settingJudgePrompt, settingJudgeTimeoutSecs, settingJudgeFailAction,
+		settingJudgeAskTimeoutSecs, settingJudgeAskTimeoutAction})
+	if err != nil {
+		return JudgeConfig{}, err
+	}
+	integer := func(key string, def int) int {
+		v, ok := values[key]
+		if !ok {
+			return def
+		}
+		n, parseErr := strconv.Atoi(strings.TrimSpace(v))
+		if parseErr != nil {
+			err = fmt.Errorf("%s: %w", key, parseErr)
+		}
+		return n
+	}
+	choice := func(key, def string, allowed ...string) string {
+		v, ok := values[key]
+		if !ok {
+			return def
+		}
+		for _, candidate := range allowed {
+			if strings.TrimSpace(v) == candidate {
+				return candidate
+			}
+		}
+		err = fmt.Errorf("invalid %s", key)
+		return def
+	}
+	enabled := choice(settingJudgeEnabled, "false", "true", "false", "1", "0")
 	c := JudgeConfig{
-		Enabled:           i.db.GetBool(settingJudgeEnabled, false),
-		ProfileID:         int64(i.getSettingInt(settingJudgeProfileID, 0)),
-		TimeoutSeconds:    i.getSettingInt(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
-		FailAction:        i.getSettingChoice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
-		AskTimeoutSeconds: i.getSettingInt(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
-		AskTimeoutAction:  i.getSettingChoice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
+		Enabled:           enabled == "true" || enabled == "1",
+		ProfileID:         int64(integer(settingJudgeProfileID, 0)),
+		TimeoutSeconds:    integer(settingJudgeTimeoutSecs, defaultJudgeTimeoutSecs),
+		FailAction:        choice(settingJudgeFailAction, defaultJudgeFailAction, "allow", "ask", "deny"),
+		AskTimeoutSeconds: integer(settingJudgeAskTimeoutSecs, defaultJudgeAskTimeoutSecs),
+		AskTimeoutAction:  choice(settingJudgeAskTimeoutAction, defaultJudgeAskTimeoutAction, "allow", "deny"),
 	}
 	// Prompt: stored value if non-empty, else the built-in template.
-	if v, ok, _ := i.db.GetSetting(settingJudgePrompt); ok && strings.TrimSpace(v) != "" {
+	if v := values[settingJudgePrompt]; strings.TrimSpace(v) != "" {
 		c.Prompt = v
 	} else {
 		c.Prompt = DefaultJudgePrompt
@@ -354,47 +398,36 @@ func (i *Interceptor) judgeConfig() JudgeConfig {
 	if c.AskTimeoutSeconds <= 0 {
 		c.AskTimeoutSeconds = defaultJudgeAskTimeoutSecs
 	}
-	return c
-}
-
-func (i *Interceptor) getSettingInt(key string, def int) int {
-	v, ok, err := i.db.GetSetting(key)
-	if err != nil || !ok {
-		return def
-	}
-	n, err := strconv.Atoi(strings.TrimSpace(v))
-	if err != nil {
-		return def
-	}
-	return n
-}
-
-func (i *Interceptor) getSettingChoice(key, def string, allowed ...string) string {
-	v, ok, err := i.db.GetSetting(key)
-	if err != nil || !ok {
-		return def
-	}
-	v = strings.TrimSpace(v)
-	for _, a := range allowed {
-		if v == a {
-			return v
-		}
-	}
-	return def
+	return c, err
 }
 
 // GetJudgeConfig returns the resolved judge configuration for the API/UI. Prompt
 // is the effective prompt (built-in template when unset), so the UI can prefill.
-func (i *Interceptor) GetJudgeConfig() JudgeConfig { return i.judgeConfig() }
+func (i *Interceptor) GetJudgeConfig() JudgeConfig {
+	c, _ := i.LoadJudgeConfig()
+	return c
+}
 
 // SetJudgeConfig persists the judge configuration. An empty Prompt clears the
 // override (the built-in template is used again).
 func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
-	if err := i.db.SetBool(settingJudgeEnabled, c.Enabled); err != nil {
-		return err
+	if c.FailAction == "" {
+		c.FailAction = defaultJudgeFailAction
 	}
-	if err := i.db.SetSetting(settingJudgeProfileID, strconv.FormatInt(c.ProfileID, 10)); err != nil {
-		return err
+	if c.AskTimeoutAction == "" {
+		c.AskTimeoutAction = defaultJudgeAskTimeoutAction
+	}
+	if c.TimeoutSeconds <= 0 {
+		c.TimeoutSeconds = defaultJudgeTimeoutSecs
+	}
+	if c.AskTimeoutSeconds <= 0 {
+		c.AskTimeoutSeconds = defaultJudgeAskTimeoutSecs
+	}
+	if c.FailAction != "allow" && c.FailAction != "ask" && c.FailAction != "deny" {
+		return fmt.Errorf("invalid fail_action")
+	}
+	if c.AskTimeoutAction != "allow" && c.AskTimeoutAction != "deny" {
+		return fmt.Errorf("invalid ask_timeout_action")
 	}
 	// Store the prompt only when it differs from the built-in template, so version
 	// updates to DefaultJudgePrompt flow through for users who never customized it.
@@ -402,22 +435,15 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 	if strings.TrimSpace(c.Prompt) != "" && strings.TrimSpace(c.Prompt) != strings.TrimSpace(DefaultJudgePrompt) {
 		promptToStore = c.Prompt
 	}
-	if err := i.db.SetSetting(settingJudgePrompt, promptToStore); err != nil {
-		return err
-	}
-	if err := i.db.SetSetting(settingJudgeTimeoutSecs, strconv.Itoa(c.TimeoutSeconds)); err != nil {
-		return err
-	}
-	if err := i.db.SetSetting(settingJudgeFailAction, c.FailAction); err != nil {
-		return err
-	}
-	if err := i.db.SetSetting(settingJudgeAskTimeoutSecs, strconv.Itoa(c.AskTimeoutSeconds)); err != nil {
-		return err
-	}
-	if err := i.db.SetSetting(settingJudgeAskTimeoutAction, c.AskTimeoutAction); err != nil {
-		return err
-	}
-	return nil
+	return i.db.SetSettings(map[string]string{
+		settingJudgeEnabled:          strconv.FormatBool(c.Enabled),
+		settingJudgeProfileID:        strconv.FormatInt(c.ProfileID, 10),
+		settingJudgePrompt:           promptToStore,
+		settingJudgeTimeoutSecs:      strconv.Itoa(c.TimeoutSeconds),
+		settingJudgeFailAction:       c.FailAction,
+		settingJudgeAskTimeoutSecs:   strconv.Itoa(c.AskTimeoutSeconds),
+		settingJudgeAskTimeoutAction: c.AskTimeoutAction,
+	})
 }
 
 // Judge runs the LLM fallback judge for a tool call that matched no rule. It
@@ -427,12 +453,18 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 // falls back to the configured FailAction. Ask verdicts carry the human-approval
 // timeout so the existing HandleAsk consumes them unchanged.
 func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.RawMessage) (Decision, bool) {
-	cfg := i.judgeConfig()
+	cfg, configErr := i.LoadJudgeConfig()
+	if configErr != nil {
+		return Decision{Action: "deny", Message: "模型审批配置不可用: " + configErr.Error()}, true
+	}
 	i.mu.RLock()
 	rv := i.reviewer
 	i.mu.RUnlock()
-	if !cfg.Enabled || rv == nil {
+	if !cfg.Enabled {
 		return Decision{}, false
+	}
+	if rv == nil {
+		return Decision{Action: "deny", Message: "模型审批尚未就绪"}, true
 	}
 
 	cctx := ctx
@@ -507,7 +539,10 @@ func judgeActionLabel(action string) string {
 // (Decision{}, false) if no rule matches.
 func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	rules, err := i.rules()
-	if err != nil || len(rules) == 0 {
+	if err != nil {
+		return Decision{Action: "deny", Message: "拦截配置不可用: " + err.Error()}, true
+	}
+	if len(rules) == 0 {
 		return Decision{}, false
 	}
 	for _, r := range rules {
@@ -565,12 +600,18 @@ func defaultMessage(action, name string) string {
 // error is swallowed so logging never changes the tool call's outcome. The pending list
 // (status='pending') is unaffected, so it still shows only asks awaiting a decision.
 func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolName string, input []byte, status string) {
+	_ = i.LogChecked(ctx, convID, dec, toolName, input, status)
+}
+
+// LogChecked persists authorization before an external action may start.
+func (i *Interceptor) LogChecked(ctx context.Context, convID int64, dec Decision, toolName string, input []byte, status string) error {
 	taskID, agentName := taskInfoFromCtx(ctx)
 	audit := auditFor(ctx, dec, input, status)
 	id, err := i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status, dec.Message, audit)
 	if err == nil {
 		i.bindResult(ctx, id, audit)
 	}
+	return err
 }
 
 // HandleAsk creates a pending approval record and blocks until the user decides
@@ -582,18 +623,31 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
 func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+	finish := BeginPhase(ctx, "approval")
+	defer finish()
+	ctx, cancel := approvalContext(ctx)
+	defer cancel()
+	if ctx.Err() != nil {
+		return false
+	}
 	ruleID := dec.RuleID
 	taskID, agentName := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)
 
 	audit := auditFor(ctx, dec, input, "pending")
+	// Serialize visibility of the persisted request and its live waiter with
+	// Decide, including callers polling immediately after INSERT commits.
+	i.pending.mu.Lock()
 	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, agentName, toolName, input, dec.Message, audit)
 	if err != nil {
+		i.pending.mu.Unlock()
 		return false
 	}
+	ch := make(chan bool, 1)
+	i.pending.ch[pendingID] = ch
+	i.pending.mu.Unlock()
 
 	i.bindResult(ctx, pendingID, audit)
-	ch := i.pending.add(pendingID)
 	defer i.pending.remove(pendingID)
 	// Polling clients can decide after INSERT commits but before the channel is
 	// registered. Re-read after registration so that decision cannot be lost;
@@ -626,7 +680,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		// No timeout: wait indefinitely until user decides or worker stops.
 		select {
 		case allowed := <-ch:
-			return allowed
+			return allowed && ctx.Err() == nil
 		case <-ctx.Done():
 			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
 			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
@@ -642,7 +696,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	defer timer.Stop()
 	select {
 	case allowed := <-ch:
-		return allowed
+		return allowed && ctx.Err() == nil
 	case <-timer.C:
 		allowed := dec.TimeoutAction == "allow"
 		action := "deny"
@@ -669,6 +723,12 @@ var ErrAlreadyDecided = errors.New("审批已处理或不存在，请刷新记�
 
 // Decide resolves a pending request. Called by the HTTP decide endpoint.
 func (i *Interceptor) Decide(pendingID int64, allowed bool) error {
+	i.pending.mu.Lock()
+	defer i.pending.mu.Unlock()
+	ch, live := i.pending.ch[pendingID]
+	if !live {
+		return ErrAlreadyDecided
+	}
 	status := "denied"
 	if allowed {
 		status = "allowed"
@@ -684,6 +744,7 @@ func (i *Interceptor) Decide(pendingID int64, allowed bool) error {
 	if !resolved {
 		return ErrAlreadyDecided
 	}
-	i.pending.resolve(pendingID, allowed)
+	delete(i.pending.ch, pendingID)
+	ch <- allowed
 	return nil
 }

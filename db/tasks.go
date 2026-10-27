@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -226,8 +227,8 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CoverageEnabled: coverageEnabled,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled)
-VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9)
+INSERT INTO tasks(name, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, bootstrap_complete)
+VALUES ($1,$2,$3,$4,$5,$6,$6,$7,$8,$9,FALSE)
 RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -491,7 +492,31 @@ UPDATE tasks
 // Returns won=false (no error) when another terminal status already stuck — the
 // caller then leaves it alone. Non-terminal transitions / re-run still use SetStatus.
 func (d *DB) SetTerminalStatusGuarded(id int64, status string) (won bool, err error) {
-	res, err := d.Exec(`
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := d.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var expID int64
+	var ready bool
+	if err := tx.QueryRowContext(ctx, `SELECT exploration_id,bootstrap_complete FROM tasks WHERE id=$1 FOR UPDATE`, id).Scan(&expID, &ready); err != nil {
+		return false, err
+	}
+	if status == "done" {
+		var unmet, goals, active bool
+		if err := tx.QueryRowContext(ctx, `SELECT
+EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal' AND state<>'met'),
+EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal'),
+EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, expID).Scan(&unmet, &goals, &active); err != nil {
+			return false, err
+		}
+		if !ready || unmet || (!goals && active) {
+			return false, nil
+		}
+	}
+	res, err := tx.ExecContext(ctx, `
 UPDATE tasks
    SET status = $1,
        completed_at = COALESCE(completed_at, now())
@@ -500,6 +525,9 @@ UPDATE tasks
 		return false, err
 	}
 	n, _ := res.RowsAffected()
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
 	return n > 0, nil
 }
 

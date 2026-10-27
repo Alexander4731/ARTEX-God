@@ -9,6 +9,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 )
 
 type toolUsageRecorder interface {
@@ -24,6 +25,10 @@ type meteredTool struct {
 	toolKey  string
 	agentKey string
 	ri       agent.RunInfo
+}
+
+func (m *meteredTool) ReviewInput(in json.RawMessage) (json.RawMessage, bool, error) {
+	return guard.DescribeInput(m.CoreTool, in)
 }
 
 func meterTool(t actool.CoreTool, recorder toolUsageRecorder, toolKey, agentKey string, ri agent.RunInfo) actool.CoreTool {

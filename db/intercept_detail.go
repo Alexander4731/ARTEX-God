@@ -19,6 +19,7 @@ type InterceptContextEntry struct {
 // InterceptAudit is captured at review time. It is deliberately excluded from
 // polling/list responses; old rows have no audit instead of reconstructed data.
 type InterceptAudit struct {
+	IntentID         int64                   `json:"intent_id,omitempty"`
 	RunID            string                  `json:"run_id,omitempty"`
 	ToolUseID        string                  `json:"tool_use_id,omitempty"`
 	Correlation      string                  `json:"correlation"` // exact | ambiguous | unavailable

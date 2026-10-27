@@ -62,6 +62,10 @@ import type {
 } from "@/lib/types";
 
 // fmtTokens 把 token 数压成紧凑写法(1.2k / 3.4M),用于审批用量统计。
+function scopeLabel(key: string): string {
+  return key === "external:*" ? "有副作用的外部工具" : key;
+}
+
 function fmtTokens(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + "M";
   if (n >= 1000) return (n / 1000).toFixed(1) + "k";
@@ -633,9 +637,9 @@ export default function InterceptPage() {
             </span>
           ) : (
             <>
-              <Badge variant="secondary" className="shrink-0">{scopeTools.length} 个工具</Badge>
-              <span className="truncate text-muted-foreground" title={scopeTools.join("、")}>
-                {scopeTools.join("、")}
+              <Badge variant="secondary" className="shrink-0">{scopeTools.length} 项</Badge>
+              <span className="truncate text-muted-foreground" title={scopeTools.map(scopeLabel).join("、")}>
+                {scopeTools.map(scopeLabel).join("、")}
               </span>
             </>
           )}
@@ -936,6 +940,13 @@ export default function InterceptPage() {
           </DialogHeader>
 
           <div className="flex-1 min-h-0 overflow-y-auto px-6 py-4 space-y-5">
+            <div className="flex items-center gap-3">
+              <Switch id="scope-external" checked={enabledTools.has("external:*")} disabled={scopeLoading}
+                onCheckedChange={(value) => toggleTool("external:*", value)} />
+              <label htmlFor="scope-external" className="cursor-pointer text-sm">
+                自动覆盖有副作用的自定义工具、MCP 和命令工具（包括新增工具）
+              </label>
+            </div>
             {scopeLoading ? (
               <p className="text-sm text-muted-foreground py-4">加载中…</p>
             ) : (

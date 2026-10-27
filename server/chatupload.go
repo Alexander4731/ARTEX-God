@@ -75,7 +75,12 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		defer s.engine.decInflight(id)
 	}
 	dir := filepath.Join(s.m.dir, sub, id, "uploads")
-	if err := os.MkdirAll(dir, 0o755); err != nil {
+	root := s.wsRoot(w)
+	if root == nil {
+		return
+	}
+	defer root.Close()
+	if err := root.MkdirAll(filepath.Join(sub, id, "uploads"), 0o755); err != nil {
 		writeErr(w, 500, "建目录失败: "+err.Error())
 		return
 	}
@@ -85,6 +90,7 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	files := r.MultipartForm.File["file"]
+	defer r.MultipartForm.RemoveAll()
 	if len(files) == 0 {
 		writeErr(w, 400, "缺少上传文件(表单字段 file)")
 		return
@@ -96,7 +102,12 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		dest := uniqueUploadPath(dir, name)
-		if err := saveUpload(hdr, dest); err != nil {
+		rel, err := filepath.Rel(s.m.dir, dest)
+		if err != nil {
+			writeErr(w, 400, "非法路径")
+			return
+		}
+		if err := saveUpload(root, hdr, rel); err != nil {
 			writeErr(w, 500, "保存失败: "+err.Error())
 			return
 		}

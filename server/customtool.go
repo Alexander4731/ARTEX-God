@@ -6,6 +6,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -186,7 +187,12 @@ const settingPythonInterp = "python_interpreter"
 func detectPython() string {
 	for _, c := range []string{"python3", "python"} {
 		if p, err := exec.LookPath(c); err == nil {
-			return p
+			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			out, runErr := exec.CommandContext(ctx, p, "-c", "import sys; print(sys.executable)").Output()
+			cancel()
+			if runErr == nil && strings.TrimSpace(string(out)) != "" {
+				return strings.TrimSpace(string(out))
+			}
 		}
 	}
 	return ""
@@ -284,13 +290,66 @@ func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
 			return actool.Errorf("未知自定义工具类型: " + kind), nil
 		}
 	}
-	return actool.Build(actool.Spec{
+	built := actool.Build(actool.Spec{
 		Name: key, Description: t.Description, Schema: schema,
 		Permissions: func(context.Context, json.RawMessage, permission.Context) permission.Decision {
 			return permission.Allowed()
 		},
 		Run: run,
 	})
+	return &customReviewTool{CoreTool: built, kind: kind, exec: append(json.RawMessage(nil), execRaw...)}
+}
+
+type customReviewTool struct {
+	actool.CoreTool
+	kind string
+	exec json.RawMessage
+}
+
+func (t *customReviewTool) ReviewInput(in json.RawMessage) (json.RawMessage, bool, error) {
+	params := map[string]any{}
+	if len(in) > 0 {
+		if err := json.Unmarshal(in, &params); err != nil {
+			return nil, true, err
+		}
+	}
+	var description any
+	switch t.kind {
+	case "command":
+		var spec commandExec
+		if err := json.Unmarshal(t.exec, &spec); err != nil {
+			return nil, true, err
+		}
+		description = map[string]any{"command": renderTemplate(spec.Command, params, shellQuote)}
+	case "script":
+		var spec scriptExec
+		if err := json.Unmarshal(t.exec, &spec); err != nil {
+			return nil, true, err
+		}
+		description = map[string]any{"code": spec.Code, "parameters": params}
+	case "http":
+		var spec httpExec
+		if err := json.Unmarshal(t.exec, &spec); err != nil {
+			return nil, true, err
+		}
+		method := strings.ToUpper(strings.TrimSpace(spec.Method))
+		if method == "" {
+			method = "GET"
+		}
+		headers := make(map[string]string, len(spec.Headers))
+		for key, value := range spec.Headers {
+			if strings.EqualFold(key, "Authorization") || strings.EqualFold(key, "Cookie") {
+				headers[key] = "[redacted]"
+			} else {
+				headers[key] = renderTemplate(value, params, identity)
+			}
+		}
+		description = map[string]any{"method": method, "url": renderTemplate(spec.URL, params, identity), "headers": headers, "body": renderTemplate(spec.Body, params, identity)}
+	default:
+		return nil, true, fmt.Errorf("未知自定义工具类型: %s", t.kind)
+	}
+	raw, err := json.Marshal(description)
+	return raw, true, err
 }
 
 // hasSchemaProps reports whether raw is a JSON-Schema object with ≥1 property.
@@ -368,7 +427,15 @@ func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.Raw
 	}
 	body, err := execPython(ctx, interp, key, spec.Code, params, workDir, sessionEnv, timeoutOr(spec.TimeoutMs, 120000))
 	if err != nil {
-		return actool.Errorf(err.Error()), nil
+		exitCode := -1
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		}
+		raw, _ := json.Marshal(map[string]any{"output": body, "error": err.Error(), "exit_code": exitCode, "timed_out": errors.Is(err, context.DeadlineExceeded)})
+		result := actool.Text(actool.Capture(tc, string(raw)))
+		result.IsError = true
+		return result, nil
 	}
 	return actool.Text(actool.Capture(tc, body)), nil
 }
@@ -412,7 +479,10 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 	} else if err != nil {
 		body += "\n[exit: " + err.Error() + "]"
 	}
-	return body, nil
+	if runCtx.Err() != nil {
+		return body, runCtx.Err()
+	}
+	return body, err
 }
 
 // ---------- http:原生请求 + 代理 ----------

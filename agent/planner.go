@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
@@ -21,6 +23,8 @@ import (
 // assets, judges whether the task goal is met, and emits 0..N exploration intents
 // into the frontier. It is the sole intent generator.
 type Planner struct {
+	guard             *guard.Guard
+	runTimeout        time.Duration
 	findingRecorder   FindingRecorder
 	prov              llm.Provider
 	model             string
@@ -47,6 +51,10 @@ type Planner struct {
 	todoMu sync.Mutex
 	todos  map[int64]*actool.TodoStore
 }
+
+func (p *Planner) SetGuard(g *guard.Guard) { p.guard = g }
+
+func (p *Planner) SetRunTimeout(d time.Duration) { p.runTimeout = d }
 
 func NewPlanner(prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
 	return &Planner{prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
@@ -353,11 +361,14 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	ctx = intercept.WithTaskContext(ctx, fmt.Sprint(taskID), "planner", emit)
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
 	// runs in a detached goroutine so it never adds latency to this round.
-	p.compactor.OnPlannerRound(ctx, ts)
+	if !taskClockFrom(ctx).Final {
+		p.compactor.OnPlannerRound(ctx, ts)
+	}
 	tsx := NewToolSet(ts, "planner")
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
@@ -376,10 +387,18 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts)})
 	tools, def, cleanup := AugmentTools(ctx, "planner", base)
 	defer cleanup()
+	if taskClockFrom(ctx).Final {
+		tools = finalPlannerTools(tools)
+		def = DeferredInfo{}
+	}
 	// 关键态势（刚完成的意图 + 预取的完整图）改放【本轮 user 输入】(见下方 input)，system
 	// 只留静态规划正文。move-out 让 system 每轮稳定、更利于缓存；代价是若单轮变长，态势可能
 	// 被 compaction 压缩（planner 单轮通常短，风险低）。situational 会拼进下方 input。
-	situational := renderTriggers(ts, triggers) + renderGraphOverview(tsx.graphOverviewData())
+	overview := tsx.graphOverviewData()
+	if problem, ok := overview["error"]; ok {
+		return false, "", fmt.Errorf("%v", problem)
+	}
+	situational := renderTriggers(ts, triggers) + renderGraphOverview(overview)
 	// 任务级 deadline / 终局模式(经 ctx 注入,见 taskclock.go)。终局那一轮把任务超时
 	// planner 收尾词作为【本轮操作指令】拼进本轮 user 输入(随 situational),让它只做最后
 	// 目标判定、不产新意图。
@@ -395,9 +414,13 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
-	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
+	roundLimit := p.runTimeout
+	if roundLimit <= 0 {
+		roundLimit = 5 * time.Minute
+	}
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, roundLimit)
+	ctx, cancelRun := runDeadline(ctx, maxDur)
+	defer cancelRun()
 	settle := wrapupSettlement("planner", nil)
 	if tc.DeadlineUnix > 0 {
 		settle = wrapupSettlementForTask("planner", nil, clamped)
@@ -442,6 +465,19 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		opts.Transcript = p.tx
 		opts.SessionID = fmt.Sprintf("exp%d-planner", ts.ID())
 	}
+	if p.guard != nil {
+		opts.Hooks = p.guard.Hooks()
+	}
+	opts.Hooks, err = durablePlannerTodos(ctx, ts, opts.Todos, opts.Hooks)
+	if err != nil {
+		return false, "", err
+	}
+	if tc.Final {
+		opts.EnableWebFetch = false
+		opts.EnableWebSearch = false
+		opts.DisableBackgroundTasks = true
+		opts.Hooks = finalPlannerHooks{opts.Hooks}
+	}
 	// 实验功能:开启后由 noa 接管上下文压缩(归档集中在 <workDir>/noa/<SessionID> 下,持久)。
 	noaSession := fmt.Sprintf("exp%d-planner", ts.ID())
 	enableNoa(&opts, p.noaEnabledFn, p.workDir, noaSession, noaWarn(noaSession))
@@ -452,16 +488,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	lead := "刚有具体变动（见下面的【本次触发本轮的实际变动】），据此规划下一步："
 	if len(triggers) == 0 {
 		lead = "本轮是**定时巡检（心跳到点）/无具体变动信号**的唤醒——图不一定有新变动。顺带复查在跑意图：长时间无进展或跑偏的用 steer_work 纠偏、方向整个错的用 kill_work 止损；再判定目标、决定是否补方向："
-		// 心跳/无变动唤醒时,若全图已无任何 open 或 running 意图 → 探索已停摆(没 worker 在跑、
-		// 也没排队方向)。明确告知 planner 并强制其本轮补出新方向,别只复查在跑意图后空转一轮。
-		if active, err := ts.HasActiveIntent(); err == nil && !active {
-			lead = "本轮是**定时巡检（心跳到点）**的唤醒,且当前**已没有任何 open 或 running 的意图**——没有 worker 在跑、也没有排队中的方向,探索已停摆。你**必须**在本轮产出一个或多个向目标推进、且与图中既有意图**互不重复**的新意图(不得产出 0 意图);先据下面的态势判定目标是否已达成,未达成则立即补方向："
-		}
+
 	}
-	input := lead + situational + "\n\n据上面的态势，判定目标。目标已【真正达成】（已拿到目标成果/已确认目标漏洞）时用 prove_goal 逐个标记。**硬底线：只要目标尚未达成、且当前没有任何 open 或 running 意图（frontier_open=0 且 running_intents 为空），本轮就必须产出至少一个向目标推进的意图——此时没有在跑的 work 可等、也没有在排队的方向，产出 0 意图=任务停摆。仅当已有 open/running 意图在推进、或目标已达成时，本轮才可以不产出新意图。**" +
+	input := lead + situational + "\n\n根据证据判断目标，已达成时用 prove_goal 确认。仍有 open/running 意图时可以等待结果；没有有效的新方向时说明缺少的证据或用户输入，不要重复派发已经完成的动作。" +
 		renderPlannerTodos(opts.Todos.List())
-	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
-	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
+
 	_, _, err = captureRun(ctx, opts, input,
 		func(r db.Activity) {
 			if emit != nil {

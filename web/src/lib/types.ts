@@ -29,6 +29,7 @@ export interface Task {
   goals_total?: number;
   goals_met?: number;
   engine_mode?: EngineMode;
+  execution_phase?: "idle" | "model" | "tool" | "approval" | "backoff" | "settling";
   tokens?: TokenTotal; // whole-task token consumption
   llm_profile_id?: number; // LLM profile used; absent = default profile
   llm_profile_ids?: number[]; // ordered task-level failover chain

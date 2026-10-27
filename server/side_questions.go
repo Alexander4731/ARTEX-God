@@ -542,7 +542,7 @@ func (s *Server) sideEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("X-Accel-Buffering", "no")
 	seq := int64(-1)
 	tick := time.NewTicker(250 * time.Millisecond)

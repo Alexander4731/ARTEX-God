@@ -506,6 +506,9 @@ func TestSideRestoredWorkerRuntimePublishesNewCheckpoint(t *testing.T) {
 	}
 	// Exercise the production startup path, including the deadline coordinator
 	// which registers the shared runtime before the worker loops.
+	f.m.mu.Lock()
+	delete(f.m.tasks, task.ID)
+	f.m.mu.Unlock()
 	f.s.restoreTaskRuntimes()
 	t.Cleanup(func() {
 		for _, task := range f.m.List() {

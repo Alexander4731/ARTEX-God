@@ -23,6 +23,12 @@ const (
 
 type traceKey struct{}
 type callKey struct{}
+type intentKey struct{}
+
+func WithIntent(ctx context.Context, id int64) context.Context {
+	return context.WithValue(ctx, intentKey{}, id)
+}
+
 type completion func(status, output string, truncated bool)
 
 type tracedCall struct {
@@ -87,6 +93,9 @@ func (t *Trace) Start(id, tool string, input []byte) {
 // WithCall claims the event before model review starts, so subsequent tools
 // cannot change this approval's context while the judge is running.
 func WithCall(ctx context.Context, tool string, input []byte) context.Context {
+	if _, claimed := ctx.Value(callKey{}).(db.InterceptAudit); claimed {
+		return ctx
+	}
 	t, _ := ctx.Value(traceKey{}).(*Trace)
 	a := db.InterceptAudit{Correlation: "unavailable", InputDigest: digestInput(input), CapturedAt: time.Now().UTC()}
 	if t != nil {
@@ -158,6 +167,7 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 		a = db.InterceptAudit{Correlation: "unavailable", InputDigest: digestInput(input), CapturedAt: time.Now().UTC()}
 	}
 	a.InitialAction, a.InitialReason = dec.Action, dec.Message
+	a.IntentID, _ = ctx.Value(intentKey{}).(int64)
 	a.ModelFallback = dec.ModelFallback
 	a.ModelInput, a.ModelInputDigest = dec.ModelInput, dec.ModelInputDigest
 	a.RuleName, a.ConfigDigest, a.ProfileID = dec.RuleName, dec.ConfigDigest, dec.ProfileID

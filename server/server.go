@@ -39,12 +39,18 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	m      *Manager
-	engine *Engine
-	ctx    context.Context
+	stop         context.CancelCauseFunc
+	backgroundMu sync.Mutex
+	backgroundWG sync.WaitGroup
+	stopping     bool
+	m            *Manager
+	engine       *Engine
+	ctx          context.Context
 
-	skillDir string // root directory for skill subdirectories
-	jwtKey   []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	skillDir      string // root directory for skill subdirectories
+	jwtKey        []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
+	authMu        sync.Mutex
+	loginAttempts map[string]loginAttempts
 
 	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
 	// scheduler tick and an HTTP settings change / task creation can't both count
@@ -80,10 +86,11 @@ type Server struct {
 	// counts in-flight runs per agent (replaces a boolean drain flag); a run's
 	// completion decrements it and re-pumps to fill the freed slot. triggerCfg caches
 	// the agent's last-read策略 so the pump never queries the DB while holding queueMu.
-	// Distinct agents always run concurrently. Queue is in-memory (matches chatBusy); a
-	// restart drops pending fires — the scheduler re-fires from watermarks next tick.
+	// Distinct agents run concurrently. This queue holds admitted database events;
+	// pending events are recovered from trigger_runs after restart.
 	queueMu       sync.Mutex
 	triggerQ      map[string][]triggeredRun
+	triggerLive   sync.Map // durable run IDs held by queued or active local executions
 	triggerActive map[string]int
 	triggerCfg    map[string]triggerBehavior
 
@@ -131,6 +138,7 @@ type provEntry struct {
 // taskID + mergeable let the drainer coalesce several event triggers (finding/goal)
 // from the SAME task into one conversation before it starts (interval fires don't merge).
 type triggeredRun struct {
+	runIDs    []int64
 	agentKey  string
 	title     string
 	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
@@ -141,11 +149,12 @@ type triggeredRun struct {
 }
 
 func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
+	ctx, stop := context.WithCancelCause(ctx)
 	key, err := loadOrCreateJWTKey(keyDir, dataDir)
 	if err != nil {
 		log.Fatalf("[auth] JWT key: %v", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
+	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, stop: stop, skillDir: skillDir, jwtKey: key, chatBusy: map[string]bool{},
 		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
@@ -225,15 +234,14 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := s.seedFindingRetester(); err != nil {
 			log.Printf("[retester] seed: %v", err)
 		}
-		go s.evidenceStore().RunGC(s.ctx)
-		s.seedPythonInterpreter()     // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		go newScheduler(s).Run(s.ctx) // P3 触发器调度(定时/finding/目标事件),仅自定义 agent
+		s.background(func() { s.evidenceStore().RunGC(s.ctx) })
+		s.seedPythonInterpreter() // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
 		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
 		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
-		go newNotifier(s).Run(s.ctx)
+		s.background(func() { newNotifier(s).Run(s.ctx) })
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
-		go s.discoverEmptyMCPsOnStartup()
+		s.background(s.discoverEmptyMCPsOnStartup)
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
@@ -252,10 +260,11 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	} else {
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
+	s.wireInterceptReviewer()
 	s.restoreTaskRuntimes()
-	go s.reconcileConcurrency()
+	s.background(s.reconcileConcurrency)
+	s.background(func() { newScheduler(s).Run(s.ctx) })
 	s.startTaskArchiveWorker()
-	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
 	return s
 }
 
@@ -269,7 +278,11 @@ func (s *Server) restoreTaskRuntimes() {
 		lifecycle := t.lifecycleSnapshot()
 		// clear stale 'running' intents from a prior crash/restart (no live worker
 		// owns them) so they re-claim instead of spinning forever in the UI.
-		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
+		if n, err := t.Store.ResetRunningIntents(); err != nil {
+			log.Printf("[engine] task %s 恢复失败，暂停领取: %v", t.ID, err)
+			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
+			continue
+		} else if n > 0 {
 			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
 		}
 		if lifecycle.Paused {
@@ -288,7 +301,9 @@ func (s *Server) restoreTaskRuntimes() {
 	for _, t := range m.List() {
 		lifecycle := t.lifecycleSnapshot()
 		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
-			s.engine.Run(s.ctx, t)
+			if !s.engine.IsPaused(t.ID) {
+				s.startAdmittedTask(t, "resume")
+			}
 		}
 	}
 }
@@ -655,6 +670,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/auth/status", s.authStatus)
 	mux.HandleFunc("POST /api/auth/init", s.authInit)
 	mux.HandleFunc("POST /api/auth/login", s.authLogin)
+	mux.HandleFunc("POST /api/auth/logout", s.authLogout)
 	mux.HandleFunc("POST /api/auth/change-password", s.authChangePassword)
 
 	mux.HandleFunc("GET /api/health", s.health)
@@ -927,6 +943,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/pending", s.interceptListPending)
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/decide", s.interceptDecide)
+	mux.HandleFunc("POST /api/intercept/pending/{id}/resolve-execution", s.interceptResolveExecution)
 	mux.HandleFunc("GET /api/intercept/history", s.interceptHistory)
 	mux.HandleFunc("GET /api/intercept/history/{id}", s.interceptDetail)
 	mux.HandleFunc("GET /api/intercept/history/{id}/execution", s.interceptExecution)
@@ -1009,7 +1026,8 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	running := s.engine.ReadyFor(t) && s.engine.Started(t.ID) && !paused
 	// A live event-driven engine with no work is healthy idle. Only a persisted
 	// running intent without any corresponding LLM call can be considered stalled.
-	stalled := running && activeCalls == 0 && inFlight > 0 && last > 0 && time.Now().Unix()-last > 120
+	phase := s.engine.executionPhase(t.ID)
+	stalled := running && phase == "idle" && activeCalls == 0 && inFlight > 0 && last > 0 && time.Now().Unix()-last > 120
 
 	// engine_mode follows the spec enum (exploring|paused|stalled|idle).
 	engineMode := "idle"
@@ -1025,15 +1043,16 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 
 	out["active_task"] = map[string]any{
 		"id": t.ID, "description": t.Description, "goal": t.Goal,
-		"running":       running,
-		"paused":        paused,
-		"engine_mode":   engineMode,
-		"in_flight":     inFlight,
-		"llm_in_flight": activeCalls,
-		"last_activity": last,
-		"stalled":       stalled,
-		"goals_total":   len(goals),
-		"goals_met":     goalsMet,
+		"running":         running,
+		"paused":          paused,
+		"engine_mode":     engineMode,
+		"in_flight":       inFlight,
+		"llm_in_flight":   activeCalls,
+		"last_activity":   last,
+		"stalled":         stalled,
+		"execution_phase": phase,
+		"goals_total":     len(goals),
+		"goals_met":       goalsMet,
 	}
 	writeJSON(w, 200, out)
 }
@@ -1588,7 +1607,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	// live slot and postpones an unavailable task's pause/queue transition until
 	// the call returns; a nudge lets an idle running task resume promptly.
 	t.Notify()
-	go s.reconcileConcurrency()
+	s.background(s.reconcileConcurrency)
 	llmState := t.llmStateSnapshot()
 	result := map[string]any{
 		"id": t.ID, "llm_profile_ids": llmState.ProfileIDs,
@@ -2938,7 +2957,7 @@ func (s *Server) streamLogs(w http.ResponseWriter, r *http.Request) {
 	}
 	since := int64(atoiDefault(r.URL.Query().Get("since"), 0))
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no")
 
@@ -3010,7 +3029,7 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Cache-Control", "no-cache, no-transform")
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
 
@@ -3474,7 +3493,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 立即协调一次:关闭时放行全部排队,调高上限时补位启动,不必等下一个 tick。
-		go s.reconcileConcurrency()
+		s.background(s.reconcileConcurrency)
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {
@@ -3736,7 +3755,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// a page reload / proxy timeout cancelled it mid-run ("context canceled"). The
 		// steps + final answer stream back live via SSE (worker="mainagent"), so the
 		// handler returns immediately and the browser never needs to hold the request.
-		go func() {
+		if !s.background(func() {
 			defer func() {
 				s.finishTaskChat(t.ID, cancel)
 			}()
@@ -3753,13 +3772,15 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
-			s.engine.BeginLLMCall(t.ID)
 			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
-			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
 			}
-		}()
+		}) {
+			s.finishTaskChat(t.ID, cancel)
+			writeErr(w, 503, "服务正在关闭")
+			return
+		}
 		writeJSON(w, 202, map[string]any{"status": "accepted", "mode": "llm"})
 		return
 	}
@@ -3884,9 +3905,13 @@ func (s *Server) gc(w http.ResponseWriter, r *http.Request) {
 
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if origin := r.Header.Get("Origin"); origin != "" && allowedOrigin(r) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+			w.Header().Add("Vary", "Origin")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type,Authorization")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(204)
 			return

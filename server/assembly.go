@@ -239,8 +239,8 @@ func wireTools(pg *db.DB, domainReg map[string]actool.CoreTool) {
 	agent.ToolResolve = func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool {
 		rows, err := pg.ListTools()
 		if err != nil {
-			log.Printf("[tools] 读取工具表失败，按代码默认放行: %v", err)
-			return tools
+			log.Printf("[tools] 读取工具配置失败，暂停工具装配: %v", err)
+			return make([]actool.CoreTool, 0)
 		}
 		byKey := make(map[string]*db.Tool, len(rows))
 		for _, t := range rows {

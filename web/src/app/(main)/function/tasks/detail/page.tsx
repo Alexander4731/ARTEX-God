@@ -254,6 +254,7 @@ function TaskDetailInner() {
           base.goals_total = at.goals_total;
           base.goals_met = at.goals_met;
           base.engine_mode = s?.engine_mode ?? at.engine_mode;
+          base.execution_phase = at.execution_phase;
           base.paused = at.paused;
         }
         setTask(base);
@@ -367,6 +368,19 @@ function TaskDetailInner() {
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
+          {!terminal && !paused && task.execution_phase && task.execution_phase !== "idle" ? (
+            <span className="text-muted-foreground text-xs">
+              {
+                {
+                  model: "模型响应中",
+                  tool: "工具执行中",
+                  approval: "等待审批",
+                  backoff: "等待重试",
+                  settling: "正在收尾",
+                }[task.execution_phase]
+              }
+            </span>
+          ) : null}
           {canArchive ? (
             <AlertDialog>
               <AlertDialogTrigger asChild>{archiveTrigger}</AlertDialogTrigger>

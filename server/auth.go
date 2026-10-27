@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"log"
 	"math/big"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +21,7 @@ import (
 const (
 	jwtKeyFilename = "jwt.key"
 	authPassKey    = "auth.password_hash"
+	authEpochKey   = "auth.session_epoch"
 	jwtTTL         = 7 * 24 * time.Hour
 	keyChars       = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 
@@ -84,8 +87,13 @@ func loadOrCreateJWTKey(keyDir, dataDir string) ([]byte, error) {
 }
 
 // signJWT issues a 7-day HS256 token for user ARTEX.
-func signJWT(key []byte) (string, error) {
+func signJWT(key []byte, epoch ...string) (string, error) {
+	version := ""
+	if len(epoch) > 0 {
+		version = epoch[0]
+	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
+		ID:        version,
 		Subject:   "ARTEX",
 		ExpiresAt: jwt.NewNumericDate(time.Now().Add(jwtTTL)),
 		IssuedAt:  jwt.NewNumericDate(time.Now()),
@@ -93,18 +101,20 @@ func signJWT(key []byte) (string, error) {
 }
 
 // verifyJWT returns true when tokenStr is a valid, non-expired HS256 token.
-func verifyJWT(tokenStr string, key []byte) bool {
-	t, err := jwt.Parse(tokenStr, func(t *jwt.Token) (any, error) {
-		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, fmt.Errorf("unexpected signing method")
-		}
+func verifyJWT(tokenStr string, key []byte, epoch ...string) bool {
+	claims := &jwt.RegisteredClaims{}
+	t, err := jwt.ParseWithClaims(tokenStr, claims, func(t *jwt.Token) (any, error) {
 		return key, nil
-	})
-	return err == nil && t.Valid
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithExpirationRequired(), jwt.WithSubject("ARTEX"))
+	version := ""
+	if len(epoch) > 0 {
+		version = epoch[0]
+	}
+	return err == nil && t.Valid && claims.ID == version
 }
 
 // extractToken reads the JWT from Authorization: Bearer header,
-// artex_token cookie, or ?token= query param (for SSE connections).
+// or the server's HttpOnly cookie (including SSE requests).
 func extractToken(r *http.Request) string {
 	if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
 		return strings.TrimPrefix(h, "Bearer ")
@@ -112,13 +122,58 @@ func extractToken(r *http.Request) string {
 	if c, err := r.Cookie("artex_token"); err == nil && c.Value != "" {
 		return c.Value
 	}
-	return r.URL.Query().Get("token")
+	return ""
+}
+
+func (s *Server) validAuth(r *http.Request) (bool, error) {
+	epoch, _, err := s.m.pg.GetSetting(authEpochKey)
+	return err == nil && verifyJWT(extractToken(r), s.jwtKey, epoch), err
+}
+
+func allowedOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return r.Header.Get("Sec-Fetch-Site") != "cross-site"
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return false
+	}
+	scheme := "http"
+	if r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https" {
+		scheme = "https"
+	}
+	host := r.Host
+	remote, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip := net.ParseIP(remote); ip != nil && ip.IsLoopback() && r.Header.Get("X-Forwarded-Host") != "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
+	return u.Scheme == scheme && strings.EqualFold(u.Host, host) && u.Path == "" && u.RawQuery == "" && u.Fragment == ""
+}
+
+func setAuthCookie(w http.ResponseWriter, r *http.Request, token string) {
+	age := int(jwtTTL.Seconds())
+	if token == "" {
+		age = -1
+	}
+	http.SetCookie(w, &http.Cookie{Name: "artex_token", Value: token, Path: "/", MaxAge: age,
+		HttpOnly: true, Secure: r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https", SameSite: http.SameSiteLaxMode})
+	w.Header().Set("Cache-Control", "no-store")
+}
+
+func (s *Server) authLogout(w http.ResponseWriter, r *http.Request) {
+	setAuthCookie(w, r, "")
+	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
 // requireAuth wraps h with JWT validation.
 // /api/auth/* and /api/health are exempt.
 func (s *Server) requireAuth(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead && r.Method != http.MethodOptions && !allowedOrigin(r) {
+			writeErr(w, 403, "请求来源不受信任")
+			return
+		}
 		p := r.URL.Path
 		if strings.HasPrefix(p, "/api/auth/") || p == "/api/health" {
 			h.ServeHTTP(w, r)
@@ -129,7 +184,12 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 			writeErr(w, 401, "未授权")
 			return
 		}
-		if !verifyJWT(tok, s.jwtKey) {
+		valid, err := s.validAuth(r)
+		if err != nil {
+			writeErr(w, 503, errDataSourceUnavailable)
+			return
+		}
+		if !valid {
 			writeErr(w, 401, "token 无效或已过期")
 			return
 		}
@@ -142,16 +202,17 @@ func (s *Server) requireAuth(h http.Handler) http.Handler {
 // 送到 /setup 去设置密码（login/page.tsx），把数据库故障包装成 200 等于把用户往
 // 覆盖已有密码的路上推。
 func (s *Server) authStatus(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	pg := s.pg(w)
 	if pg == nil {
 		return
 	}
-	hash, _, err := pg.GetSetting(authPassKey)
+	values, err := pg.GetSettings([]string{authPassKey, authEpochKey})
 	if err != nil {
 		writeErr(w, 503, errDataSourceUnavailable)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"initialized": hash != ""})
+	writeJSON(w, 200, map[string]any{"initialized": values[authPassKey] != "", "authenticated": verifyJWT(extractToken(r), s.jwtKey, values[authEpochKey])})
 }
 
 // POST /api/auth/init — sets the password for the first time; rejected if already set.
@@ -202,6 +263,7 @@ func (s *Server) authInit(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "token 生成失败")
 		return
 	}
+	setAuthCookie(w, r, tok)
 	writeJSON(w, 200, map[string]any{"token": tok})
 }
 
@@ -213,7 +275,12 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	if !verifyJWT(extractToken(r), s.jwtKey) {
+	valid, authErr := s.validAuth(r)
+	if authErr != nil {
+		writeErr(w, 503, errDataSourceUnavailable)
+		return
+	}
+	if !valid {
 		writeErr(w, 401, "未授权")
 		return
 	}
@@ -251,15 +318,27 @@ func (s *Server) authChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "密码加密失败")
 		return
 	}
-	if err := pg.SetSetting(authPassKey, string(newHash)); err != nil {
+	epoch := rand.Text()
+	if err := pg.SetSettings(map[string]string{authPassKey: string(newHash), authEpochKey: epoch}); err != nil {
 		writeErr(w, 500, "保存失败: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"ok": true})
+	tok, err := signJWT(s.jwtKey, epoch)
+	if err != nil {
+		writeErr(w, 500, "token 生成失败")
+		return
+	}
+	setAuthCookie(w, r, tok)
+	writeJSON(w, 200, map[string]any{"ok": true, "token": tok})
 }
 
 // POST /api/auth/login — validates username/password and returns a JWT.
 func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.allowLogin(r) {
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, 429, "登录尝试过于频繁，请稍后重试")
+		return
+	}
 	pg := s.pg(w)
 	if pg == nil {
 		return
@@ -276,12 +355,13 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "用户名或密码错误")
 		return
 	}
-	hash, ok, err := pg.GetSetting(authPassKey)
+	values, err := pg.GetSettings([]string{authPassKey, authEpochKey})
 	if err != nil {
 		writeErr(w, 503, errDataSourceUnavailable)
 		return
 	}
-	if !ok || hash == "" {
+	hash := values[authPassKey]
+	if hash == "" {
 		writeErr(w, 403, "密码未初始化，请先设置密码")
 		return
 	}
@@ -289,10 +369,47 @@ func (s *Server) authLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 401, "用户名或密码错误")
 		return
 	}
-	tok, err := signJWT(s.jwtKey)
+	tok, err := signJWT(s.jwtKey, values[authEpochKey])
 	if err != nil {
 		writeErr(w, 500, "token 生成失败")
 		return
 	}
+	setAuthCookie(w, r, tok)
 	writeJSON(w, 200, map[string]any{"token": tok})
+}
+
+type loginAttempts struct {
+	count int
+	until time.Time
+}
+
+func (s *Server) allowLogin(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		host = r.RemoteAddr
+	}
+	s.authMu.Lock()
+	defer s.authMu.Unlock()
+	if s.loginAttempts == nil {
+		s.loginAttempts = make(map[string]loginAttempts)
+	}
+	now := time.Now()
+	for ip, attempt := range s.loginAttempts {
+		if !attempt.until.After(now) {
+			delete(s.loginAttempts, ip)
+		}
+	}
+	a := s.loginAttempts[host]
+	if a.count == 0 {
+		if len(s.loginAttempts) >= 1024 {
+			return false
+		}
+		a.until = now.Add(time.Minute)
+	}
+	if a.count >= 10 {
+		return false
+	}
+	a.count++
+	s.loginAttempts[host] = a
+	return true
 }

@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"github.com/Autumn-27/artex/guard"
 
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -131,6 +132,10 @@ type overriddenTool struct {
 
 func (o *overriddenTool) Description() string         { return o.desc }
 func (o *overriddenTool) InputSchema() map[string]any { return o.schema }
+
+func (o *overriddenTool) ReviewInput(in json.RawMessage) (json.RawMessage, bool, error) {
+	return guard.DescribeInput(o.CoreTool, injectDefaults(in, o.schema))
+}
 
 func (o *overriddenTool) Call(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
 	return o.CoreTool.Call(ctx, injectDefaults(in, o.schema), tc)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -363,10 +364,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := pg.RecoverFindingRetests(); err != nil {
-		pg.Close()
-		return nil, fmt.Errorf("recover finding retests: %w", err)
-	}
 	if err := pg.EnsureLLMRecordsTable(); err != nil {
 		log.Printf("[llmrec] create table: %v", err)
 	}
@@ -378,24 +375,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
 			log.Printf("[traffic] disabled: %v", err)
-		} else {
-			err = tr.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
-				if taskID <= 0 {
-					return false, errors.New("归档流量暂存日志缺少任务 ID")
-				}
-				task, taskErr := pg.GetTask(taskID)
-				if taskErr != nil {
-					return false, taskErr
-				}
-				// Archived/permanently deleted tasks are hidden from GetTask. A
-				// restored task is visible and needs the staged traffic put back.
-				return task == nil, nil
-			})
-			if err != nil {
-				_ = tr.Close()
-				_ = pg.Close()
-				return nil, fmt.Errorf("recover traffic delete staging: %w", err)
-			}
 		}
 		if tr != nil {
 			m.traffic = tr
@@ -807,6 +786,40 @@ func (m *Manager) Close() error {
 		m.traffic.Close()
 	}
 	return m.pg.Close()
+}
+
+// AcquireRuntime must precede recovery or starting any server execution loops.
+func (m *Manager) AcquireRuntime(ctx context.Context, lost func(error)) (*pgdb.RuntimeLock, error) {
+	lock, err := m.pg.AcquireRuntimeLock(ctx, lost)
+	if err != nil {
+		return nil, err
+	}
+	if m.traffic != nil {
+		err := m.traffic.RecoverHostDeleteStages(func(_ int64, taskID int64) (bool, error) {
+			if taskID <= 0 {
+				return false, errors.New("归档流量暂存日志缺少任务 ID")
+			}
+			task, err := m.pg.GetTask(taskID)
+			return task == nil, err
+		})
+		if err != nil {
+			lock.Close()
+			return nil, fmt.Errorf("recover traffic delete staging: %w", err)
+		}
+	}
+	if err := m.pg.RecoverFindingRetests(); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	if err := m.pg.RecoverIntercepts(); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	if err := m.pg.RecoverTriggerRuns(); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	return lock, nil
 }
 
 // isTerminalStatus reports whether a task status is terminal (done/failed/timeout).

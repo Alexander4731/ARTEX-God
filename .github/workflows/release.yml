@@ -53,6 +53,7 @@ jobs:
           ARTEX_TARGET_OS: ${{ matrix.goos }}
           ARTEX_TARGET_ARCH: ${{ matrix.goarch }}
           ARTEX_BUILD_VERSION: ${{ github.ref_name }}
+          ARTEX_UPDATE_REPO: ${{ github.repository }}
           ARTEX_SKIP_FRONTEND: "1"
           ARTEX_SKIP_NPM_CI: "1"
           # UPX 自解压 ELF 在部分 Linux 内核、虚拟化和安全策略下会崩溃。

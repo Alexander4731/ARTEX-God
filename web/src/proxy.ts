@@ -16,11 +16,6 @@ export function proxy(request: NextRequest) {
     return NextResponse.redirect(new URL("/login", request.url));
   }
 
-  // 已登录时访问登录/初始化页 → 跳转主界面
-  if (token && isAuthPage) {
-    return NextResponse.redirect(new URL("/function/tasks", request.url));
-  }
-
   return NextResponse.next();
 }
 

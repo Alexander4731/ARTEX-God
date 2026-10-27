@@ -298,6 +298,8 @@ export function ApprovalDetail({
   onResolved?: (status: "allowed" | "denied" | "timeout") => void;
 }) {
   const [detail, setDetail] = React.useState<InterceptDetail | null>(null);
+  const [resolutionNote, setResolutionNote] = React.useState("");
+  const [resolving, setResolving] = React.useState(false);
   const [error, setError] = React.useState("");
   const [retry, setRetry] = React.useState(0);
   const [more, setMore] = React.useState(defaultExpanded);
@@ -329,6 +331,17 @@ export function ApprovalDetail({
   // Row updates are authoritative until the lazy detail has caught up.
   const current = detail?.status === row.status ? detail : row;
   const audit = detail?.audit;
+  async function resolveExecution(status: "succeeded" | "failed" | "not_executed") {
+    setResolving(true);
+    try {
+      await api.resolveExecution(row.id, status, resolutionNote);
+      setRetry((value) => value + 1);
+    } catch (error) {
+      setError((error as Error).message);
+    } finally {
+      setResolving(false);
+    }
+  }
   let execution = audit ? executionLabels[audit.execution_status] : "未记录";
   if (row.status === "pending") execution = "尚未执行";
   if (audit && audit.correlation !== "exact" && audit.effective_action === "allow") execution = "未关联执行结果";
@@ -491,6 +504,45 @@ export function ApprovalDetail({
                 text={audit.output ?? (audit.execution_status === "not_executed" ? "工具未执行。" : "尚无执行输出")}
                 truncated={audit.output_truncated}
               />
+              {!readOnly && audit.execution_status === "unknown" ? (
+                <div className="space-y-2">
+                  <label className="text-sm" htmlFor={`execution-note-${row.id}`}>
+                    核验依据
+                  </label>
+                  <textarea
+                    id={`execution-note-${row.id}`}
+                    className="min-h-20 w-full rounded-md border p-2 text-sm"
+                    value={resolutionNote}
+                    onChange={(event) => setResolutionNote(event.target.value)}
+                    placeholder="检查目标系统或执行日志后，记录实际结果"
+                  />
+                  <div className="flex flex-wrap gap-2">
+                    <Button
+                      size="sm"
+                      disabled={resolving || !resolutionNote.trim()}
+                      onClick={() => void resolveExecution("succeeded")}
+                    >
+                      已确认成功
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={resolving || !resolutionNote.trim()}
+                      onClick={() => void resolveExecution("failed")}
+                    >
+                      已确认失败
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={resolving || !resolutionNote.trim()}
+                      onClick={() => void resolveExecution("not_executed")}
+                    >
+                      已确认未执行
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
               {audit.correlation !== "exact" ? (
                 <Alert>
                   <AlertDescription>
@@ -681,7 +733,9 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         // filter. Older requests must remain actionable even when newer decisions
         // fill the page or a filter would hide them.
         const [history, pending] = await Promise.allSettled([
-          taskId ? api.interceptTaskPage(taskId, page, pageSize, filter) : api.interceptHistoryPage(page, pageSize, filter),
+          taskId
+            ? api.interceptTaskPage(taskId, page, pageSize, filter)
+            : api.interceptHistoryPage(page, pageSize, filter),
           api.interceptPending(),
         ]);
         if (id !== request.current) return;

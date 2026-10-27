@@ -84,7 +84,18 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
-	if !g.interceptor.IsToolEnabled(ev.ToolName) {
+	external, _ := ctx.Value(externalReviewKey{}).(bool)
+	enabled, err := g.interceptor.CheckToolEnabled(ev.ToolName, external)
+	if err != nil {
+		return g.block(ev.ToolName, systemBlockMessage("拦截配置不可用: "+err.Error()), "")
+	}
+	if !enabled {
+		if external {
+			ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
+			if err := g.interceptor.LogChecked(ctx, intercept.ConvIDFromContext(ctx), intercept.Decision{Action: "allow", Message: "当前策略允许执行"}, ev.ToolName, ev.Input, "allowed"); err != nil {
+				return g.block(ev.ToolName, "执行记录保存失败: "+err.Error(), "")
+			}
+		}
 		return hook.Result{}
 	}
 	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
@@ -94,7 +105,7 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		// or unwired, keep current behavior and allow.
 		d, judged := g.interceptor.Judge(ctx, ev.ToolName, ev.Input)
 		if !judged {
-			return hook.Result{}
+			d = intercept.Decision{Action: "allow", Message: "当前策略允许执行"}
 		}
 		dec = d
 	}
@@ -105,7 +116,9 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
 	case "allow":
 		// Record explicit rule and model approvals so review details remain auditable.
-		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed")
+		if err := g.interceptor.LogChecked(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "allowed"); err != nil {
+			return g.block(ev.ToolName, systemBlockMessage("执行授权记录保存失败: "+err.Error()), "")
+		}
 		return hook.Result{}
 	case "ask":
 		// If the worker context is already cancelled (task stopped / killed), block

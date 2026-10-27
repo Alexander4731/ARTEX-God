@@ -195,12 +195,26 @@ func (s *ExplorationStore) Root() (description, goal string, err error) {
 
 // AddNode writes a typed reasoning node with optional anchors to asset ids.
 func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority int, state, origin string, anchors []int64) (int64, error) {
-	raw, _ := json.Marshal(payload)
+	return s.AddNodeLinked(kind, payload, priority, state, origin, anchors, nil, "")
+}
+
+// AddNodeLinked commits a node, its asset anchors and required parent edges as
+// one unit. A failed edge never leaves a successful-looking orphan node.
+func (s *ExplorationStore) AddNodeLinked(kind string, payload map[string]any, priority int, state, origin string, anchors, parents []int64, relation string) (int64, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return 0, err
+	}
 	tx, err := s.db.Begin()
 	if err != nil {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if kind == KindGoal || kind == KindIntent {
+		if err := lockTaskGraphWrite(tx, s.expID); err != nil {
+			return 0, err
+		}
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -210,6 +224,12 @@ VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
 	}
 	for _, a := range anchors {
 		if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id, asset_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, id, a); err != nil {
+			return 0, err
+		}
+	}
+	for _, parent := range parents {
+		if _, err := tx.Exec(`INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id)
+VALUES($1,$2,$3,$4) ON CONFLICT DO NOTHING`, s.expID, parent, relation, id); err != nil {
 			return 0, err
 		}
 	}
@@ -310,7 +330,11 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 // backend restart or crashed worker goroutine left it stuck) would otherwise spin
 // forever in the UI. Workers resume from their transcript, so reopening is safe.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes SET state='open', completed_at=NULL, blocked_reason=NULL
+	res, err := s.db.Exec(`UPDATE exploration_nodes AS n SET
+state=CASE WHEN EXISTS(SELECT 1 FROM intercept_pending ip JOIN tasks t ON ip.task_id=t.id::text
+ WHERE t.exploration_id=$1 AND (ip.audit->>'intent_id' IS NULL OR ip.audit->>'intent_id'=n.id::text)
+ AND ip.audit->>'execution_status' IN ('unknown','awaiting_result')) THEN 'paused' ELSE 'open' END,
+completed_at=NULL, blocked_reason=NULL
 WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
 	if err != nil {
 		return 0, err

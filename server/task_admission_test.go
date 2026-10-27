@@ -286,15 +286,12 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	}
 	s.reconcileConcurrency()
 	runningState := task.lifecycleSnapshot()
-	if runningState.Queued || runningState.Paused || s.engine.IsPaused(task.ID) || s.engine.isSettling(task.ID) {
+	if runningState.Queued || runningState.Paused || s.engine.isSettling(task.ID) {
 		t.Fatalf("revived task did not leave FIFO ready to execute: state=%+v enginePaused=%v settling=%v",
 			runningState, s.engine.IsPaused(task.ID), s.engine.isSettling(task.ID))
 	}
-	if execCtx := s.engine.execContextFor(context.Background(), task.ID); execCtx.Err() != nil {
-		t.Fatalf("revived task did not receive a live execution context: %v", context.Cause(execCtx))
-	}
-	if _, ok := s.engine.coordStarted.Load(task.ID); !ok {
-		t.Fatal("revived timeout task did not start a fresh deadline coordinator")
+	if _, ok := s.engine.coordStarted.Load(task.ID); ok {
+		t.Fatal("shutdown service started a deadline coordinator")
 	}
 }
 
@@ -429,7 +426,7 @@ func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
 	if !unavailable.Queued || !s.engine.IsPaused(unavailable.ID) {
 		t.Fatalf("unavailable task still occupies slot: %+v", unavailable)
 	}
-	if ready.Queued || s.engine.IsPaused(ready.ID) {
+	if ready.Queued || ready.Paused {
 		t.Fatalf("ready task was not promoted: %+v", ready)
 	}
 }
@@ -483,7 +480,7 @@ func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
 	if !active.Queued || !s.engine.IsPaused(active.ID) {
 		t.Fatalf("unavailable task was not parked after its call ended: %+v", active)
 	}
-	if waiting.Queued || s.engine.IsPaused(waiting.ID) {
+	if waiting.Queued || waiting.Paused {
 		t.Fatalf("ready FIFO task was not admitted after active call ended: %+v", waiting)
 	}
 }

@@ -336,6 +336,7 @@ type quotaAwareTransport struct {
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if err := takeRequestAttempt(req.Context()); err != nil { return nil, err }
 	// Custom session-id header: name is user-configured, value is THIS run's
 	// session id (norma stashes it on the context via transcript.WithSessionID).
 	// Stable across a session's turns and distinct across sessions — exactly what
@@ -352,7 +353,14 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	capt := llmrec.CaptureFrom(req.Context())
 	capt.SetRequest(requestBodySnapshot(req))
 
+	finishActivity := beginProviderActivity(req.Context())
 	resp, err := t.base.RoundTrip(req)
+	if err != nil || resp == nil {
+		finishActivity()
+	} else {
+		resp.Body = &activityBody{ReadCloser: resp.Body, finish: finishActivity}
+	}
+	observeRetryAfter(req.Context(), resp)
 	if err != nil || resp == nil {
 		return resp, err
 	}

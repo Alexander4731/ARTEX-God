@@ -111,8 +111,8 @@ func TestInterceptDetailHTTP(t *testing.T) {
 		}
 	}
 	decisionPath := fmt.Sprintf("/api/intercept/pending/%d/decide", id)
-	if r := do(http.MethodPost, decisionPath, `{"decision":"denied"}`, true); r.Code != 200 {
-		t.Fatalf("decide: %d %s", r.Code, r.Body.String())
+	if r := do(http.MethodPost, decisionPath, `{"decision":"denied"}`, true); r.Code != 409 {
+		t.Fatalf("orphan decision: %d %s", r.Code, r.Body.String())
 	}
 	if r := do(http.MethodPost, decisionPath, `{"decision":"allowed"}`, true); r.Code != 409 {
 		t.Fatalf("duplicate decision: %d", r.Code)

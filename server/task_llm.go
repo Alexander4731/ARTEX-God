@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"log"
+	"math/rand/v2"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -220,6 +221,7 @@ func (r *taskLLMRuntime) streamHooks() taskLLMStreamHooks {
 }
 
 func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+	ctx = r.activityContext(ctx)
 	ctx = llmrec.WithTaskID(ctx, r.taskID)
 	return streamTaskLLM(ctx, r.taskID, req, r.streamHooks())
 }
@@ -230,15 +232,30 @@ func (r *taskLLMRuntime) Stream(ctx context.Context, req llm.CompletionRequest) 
 // duplicated model output or tool execution (the "committed" bookkeeping the
 // streaming path needs is unnecessary here).
 func (r *taskLLMRuntime) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	ctx = r.activityContext(ctx)
 	ctx = llmrec.WithTaskID(ctx, r.taskID)
 	return completeTaskLLM(ctx, r.taskID, req, r.streamHooks())
 }
 
+func (r *taskLLMRuntime) activityContext(ctx context.Context) context.Context {
+	return agent.WithProviderActivity(ctx, func() func() {
+		r.s.engine.BeginLLMCall(r.taskID)
+		return func() { r.s.engine.EndLLMCall(r.taskID) }
+	})
+}
+
 func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) (llm.Message, string, llm.Usage, error) {
+	budgeted := false
 	for {
 		selection, err := hooks.current()
 		if err != nil {
 			return llm.Message{}, "", llm.Usage{}, err
+		}
+		if !budgeted {
+			var cancel context.CancelFunc
+			ctx, cancel = agent.WithRetryBudget(ctx, agent.RequestAttemptLimit(selection.retry), requestBudgetDuration(ctx))
+			defer cancel()
+			budgeted = true
 		}
 		var (
 			msg     llm.Message
@@ -268,7 +285,7 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		}
 		// profileID=0: 显式链已被清空;非额度错误:透传。二者都不改任务 failover 状态。
 		if selection.profileID == 0 || !isQuotaExhaustedError(callErr) {
-			return llm.Message{}, "", llm.Usage{}, callErr
+			return llm.Message{}, "", llm.Usage{}, &taskLLMError{taskID: taskID, cause: callErr}
 		}
 		transition, markErr := hooks.exhaust(selection, callErr)
 		if markErr != nil {
@@ -286,11 +303,18 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 
 func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest, hooks taskLLMStreamHooks) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {
+		budgeted := false
 		for {
 			selection, err := hooks.current()
 			if err != nil {
 				yield(llm.StreamEvent{}, err)
 				return
+			}
+			if !budgeted {
+				var cancel context.CancelFunc
+				ctx, cancel = agent.WithRetryBudget(ctx, agent.RequestAttemptLimit(selection.retry), requestBudgetDuration(ctx))
+				defer cancel()
+				budgeted = true
 			}
 			committed := false
 			var pending []llm.StreamEvent
@@ -354,7 +378,7 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 						return
 					}
 				}
-				yield(llm.StreamEvent{}, streamErr)
+				yield(llm.StreamEvent{}, &taskLLMError{taskID: taskID, cause: streamErr})
 				return
 			}
 			transition, markErr := hooks.exhaust(selection, streamErr)
@@ -405,7 +429,15 @@ const sameProviderStreamRetries = 2
 // 与 SDK 的指数梯度同风格但封顶更小,避免拖住 worker 的收尾/取消响应。
 // 以变量形式暴露,便于测试将退避置零。
 var sameProviderRetryBackoff = func(attempt int) time.Duration {
-	return min(500*time.Millisecond*(1<<attempt), 4*time.Second)
+	base := min(500*time.Millisecond*(1<<attempt), 4*time.Second)
+	return base/2 + time.Duration(rand.Int64N(int64(base/2)+1))
+}
+
+func requestBudgetDuration(ctx context.Context) time.Duration {
+	if deadline, ok := ctx.Deadline(); ok {
+		return time.Until(deadline)
+	}
+	return 5 * time.Minute
 }
 
 // sameProviderRetryPolicy 解析这次调用用哪套同 provider 重试参数:配置里设了次数就
@@ -430,6 +462,9 @@ func sameProviderRetryPolicy(r agent.RetryConfig) (retries int, backoff func(int
 //   - 4xx 确定性拒绝(400/401/403/404/422):到哪个 provider 都一样会失败
 func isRetryableStreamError(err error) bool {
 	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
 	if isQuotaExhaustedError(err) {
@@ -552,6 +587,9 @@ func (s *Server) invalidateTaskAgents() {
 func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	s.taskAgentMu.Lock()
 	defer s.taskAgentMu.Unlock()
+	if s.taskAgents == nil {
+		s.taskAgents = make(map[string]*taskAgentBundle)
+	}
 	if bundle := s.taskAgents[t.ID]; bundle != nil {
 		return bundle
 	}
@@ -572,6 +610,8 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
 	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl.SetGuard(t.Guard)
+	pl.SetRunTimeout(time.Duration(s.agentRunSeconds("planner")) * time.Second)
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
@@ -585,8 +625,20 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
-	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
+	compactor := agent.NewCompactor(plannerRuntime, "task-router")
+	compactor.SetBackgroundRunner(func(run func()) bool {
+		if !s.engine.beginTaskOperation(t.ID) {
+			return false
+		}
+		if !s.background(func() { defer s.engine.decInflight(t.ID); run() }) {
+			s.engine.decInflight(t.ID)
+			return false
+		}
+		return true
+	})
+	pl.SetCompactor(compactor)
 	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	main.SetGuard(t.Guard)
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)

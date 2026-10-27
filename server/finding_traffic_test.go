@@ -367,23 +367,23 @@ func TestFindingTrafficFailedReportDoesNotTrigger(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var last int64
-	if err = s.m.pg.QueryRow(`SELECT COALESCE(max(id),0) FROM activity`).Scan(&last); err != nil {
-		t.Fatal(err)
-	}
-	if err = s.m.pg.SetSchedState(schedKeyLastToolCall, strconv.FormatInt(last, 10)); err != nil {
-		t.Fatal(err)
-	}
-	id, err := s.m.pg.Exploration(task.ExplorationID).AppendActivity(db.Activity{Kind: "tool_result", Tool: "report_finding", ToolUseID: "failure-fixture", IsError: true, Detail: "body missing"})
+	trigger, err := s.m.pg.CreateTrigger(&db.AgentTrigger{AgentKey: "reporter-failure-test", Enabled: true, OnToolCall: true, ToolNames: []string{"report_finding"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A nil server makes any attempted trigger fail this test immediately.
-	scheduler := &Scheduler{pg: s.m.pg}
-	scheduler.fireToolCalls([]*db.AgentTrigger{{OnToolCall: true, ToolNames: []string{"report_finding"}, AgentKey: "reporter"}})
-	if got := scheduler.mustState(schedKeyLastToolCall); got != strconv.FormatInt(id, 10) {
-		t.Fatal("failed finding must still advance watermark", got)
+	defer s.m.pg.DeleteTrigger(trigger.ID)
+	_, err = s.m.pg.Exploration(task.ExplorationID).AppendActivity(db.Activity{Kind: "tool_result", Tool: "report_finding", ToolUseID: "failure-fixture", IsError: true, Detail: "body missing"})
+	if err != nil {
+		t.Fatal(err)
 	}
+	var count int
+	if err = s.m.pg.QueryRow(`SELECT COUNT(*) FROM trigger_runs WHERE trigger_id=$1`, trigger.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("failed finding report scheduled an execution")
+	}
+
 }
 
 func TestFindingTrafficUTF8SegmentsAndInheritedWrites(t *testing.T) {

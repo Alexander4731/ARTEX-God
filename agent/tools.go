@@ -353,8 +353,17 @@ func (t *ToolSet) graphOverview() actool.CoreTool {
 // an empty context and always needs this first).
 func (t *ToolSet) graphOverviewData() map[string]any {
 	out := map[string]any{}
+	counts, err := t.ts.NodeCounts()
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	}
+	out["goals_total"] = counts[db.KindGoal]
 	// goals summary folded in so the planner needn't call list_goals each round.
-	goals, _ := t.ts.ListByKind(db.KindGoal, 100)
+	goals, moreGoals, err := t.ts.ListByKindPage(db.KindGoal, 0, 100)
+	if err != nil {
+		return map[string]any{"error": "目标读取失败: " + err.Error()}
+	}
+	out["goals_truncated"] = moreGoals
 	gsum := make([]map[string]any, 0, len(goals))
 	for _, g := range goals {
 		var p map[string]any
@@ -364,7 +373,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	out["goals"] = gsum
 	// hints: 人类/主 agent 通过 add_hint 挂上图的战略提示；folded in so the
 	// planner reads them every round when generating intents (否则只写不读).
-	hints, _ := t.ts.ListByKind(db.KindHint, 50)
+	hints, err := t.ts.ListByKind(db.KindHint, 50)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	}
 	hsum := make([]map[string]any, 0, len(hints))
 	for _, h := range hints {
 		var p map[string]any
@@ -376,11 +388,15 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		hsum = append(hsum, hint)
 	}
 	out["hints"] = hsum
+	out["hints_truncated"] = counts[db.KindHint] > int64(len(hsum))
 	// lineage from the exploration edges: an intent's parents (what it
 	// derived_from — possibly several facts combined) and its yields (the
 	// facts/findings it produced). factFrom maps a fact → the intent that
 	// produced it. This is the relationship layer the flat lists lacked.
-	edges, _ := t.ts.Edges(5000)
+	edges, err := t.ts.Edges(5000)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	}
 	parentsOf := map[int64][]int64{}
 	yieldsOf := map[int64][]int64{}
 	factFrom := map[int64]int64{}
@@ -409,14 +425,27 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	}
 	hidden := func(id int64) bool { _, c := covered[id]; return c && !hotAtRender[id] }
 	const openIntentsCap = 30
-	fr, _ := t.ts.Frontier(openIntentsCap) // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
+	fr, err := t.ts.Frontier(openIntentsCap)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	} // priority DESC, id ASC —— 优先级最高的前 N 条；真实总数见 frontier_open
 	out["open_intents"] = compactIntents(fr, parentsOf, yieldsOf)
-	all, _ := t.ts.ListByKind(db.KindIntent, 300)
-	var running, recentDone []*db.Node
+	all, err := t.ts.ListByKind(db.KindIntent, 300)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	}
+	running, err := t.ts.IntentsInState("running")
+	if err != nil {
+		return map[string]any{"error": "运行意图读取失败: " + err.Error()}
+	}
+	paused, err := t.ts.IntentsInState("paused")
+	if err != nil {
+		return map[string]any{"error": "暂停意图读取失败: " + err.Error()}
+	}
+	out["paused_intents"] = compactIntents(paused, parentsOf, yieldsOf)
+	var recentDone []*db.Node
 	for _, n := range all {
 		switch n.State {
-		case "running":
-			running = append(running, n)
 		case "done", "blocked", "exhausted":
 			if hidden(n.ID) {
 				continue // in a cold_digest and still cold — shown via cold_digests (§6.2)
@@ -430,21 +459,29 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 	// 让 planner 去重时别把"没显示"当成"没派过"，无需在提示词里另行解释。
 	if dt, err := t.ts.CountFinishedIntents(); err == nil {
 		out["done_intents_total"] = dt
+	} else {
+		return map[string]any{"error": "意图计数失败: " + err.Error()}
 	}
 	// frontier_open：开放意图真实总数（open_intents 只是其中优先级最高的前 N 条截断视图）。
 	if fo, err := t.ts.CountOpenIntents(); err == nil {
 		out["frontier_open"] = fo
 	} else {
-		out["frontier_open"] = len(fr)
+		out["error"] = "待执行意图计数失败: " + err.Error()
 	}
 	// findings (confirmed vulns) and facts (worker exploration results) are
 	// now distinct node kinds. recent_facts surfaces fact summaries (esp.
 	// negative results) so the planner sees them in one call; full content
 	// via node_detail(id).
-	vulnNodes, _ := t.ts.ListByKind(db.KindFinding, 1000)
-	factNodes, _ := t.ts.ListByKind(db.KindFact, 1000) // newest first
-	out["findings_total"] = len(vulnNodes)             // 确认漏洞总数（目标判定看它）；明细见 finding_list（最新一窗）
-	out["facts"] = len(factNodes)                      // 探索事实/结论数（含否定结论）
+	vulnNodes, err := t.ts.ListByKind(db.KindFinding, 1000)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	}
+	factNodes, err := t.ts.ListByKind(db.KindFact, 1000)
+	if err != nil {
+		return map[string]any{"error": "图概览读取失败: " + err.Error()}
+	} // newest first
+	out["findings_total"] = counts[db.KindFinding]
+	out["facts"] = counts[db.KindFact]
 	// findings 是任务里最高价值的产物 → 概览带最新一窗（≤10 条，vulnNodes 已按 id 降序即最新在前），
 	// 让 planner 每轮判目标时一眼看到最近确认的漏洞；全量/更早的用 list_findings 取。
 	// 每条只留 {id, summary, from_intent?}：from_intent 是产生本漏洞的意图。
@@ -464,6 +501,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		findingList = append(findingList, m)
 	}
 	out["finding_list"] = findingList
+	out["findings_truncated"] = counts[db.KindFinding] > int64(len(findingList))
 	// recent_facts：非折叠事实里最新的一窗（≤N，factNodes 按 id 降序即最新在前）。已折进
 	// digest 且仍冷的（hidden）走 cold_digests，不在此重复。每条 {id, summary, from_intent?,
 	// confidence?}；evidence 等详情用 node_detail(id)。更早的用 list_facts 翻。
@@ -491,6 +529,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		recentFacts = append(recentFacts, m)
 	}
 	out["recent_facts"] = recentFacts
+	out["facts_truncated"] = counts[db.KindFact] > int64(len(recentFacts))
 	// recent_done_intents：非折叠的已结束意图里最新的一窗（≤N，recentDone 已按 id 降序）。
 	// 更早的看 done_intents_total 计数 + node_detail(id)。
 	const recentDoneCap = 12
@@ -1068,24 +1107,19 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}
-	id, err := t.ts.AddIntent(payload, priority, anchors, "planner")
-	if err != nil {
-		return 0, err
-	}
-	// upstream lineage: link each (validated) fact/finding parent → this intent, so
-	// "multiple facts combine into one new intent" is expressible.
-	for _, parent := range parents {
-		_ = t.ts.Link(parent, db.RelDerivedFrom, id)
-	}
 	// a top-level intent (no explicit parent) connects to the origin fact, so every
 	// intent still traces back to a fact node — at task start the only fact is the
 	// origin, and the first intents derive from it.
 	if len(parents) == 0 {
-		if origin, _ := t.ts.OriginFactID(); origin > 0 {
-			_ = t.ts.Link(origin, db.RelDerivedFrom, id)
+		origin, err := t.ts.OriginFactID()
+		if err != nil {
+			return 0, err
+		}
+		if origin > 0 {
+			parents = append(parents, origin)
 		}
 	}
-	return id, nil
+	return t.ts.AddNodeLinked(db.KindIntent, payload, priority, "open", "planner", anchors, parents, db.RelDerivedFrom)
 }
 
 func (t *ToolSet) addIntent() actool.CoreTool {
@@ -1180,21 +1214,15 @@ func (t *ToolSet) proveGoal() actool.CoreTool {
 			if err != nil || evidenceNode == nil || (evidenceNode.Kind != db.KindFact && evidenceNode.Kind != db.KindFinding) {
 				return actool.Errorf("evidence_id 必须是本任务或直接关联任务的事实/漏洞节点"), nil
 			}
-			_ = t.ts.Link(ev, db.RelProves, goal)
-			_ = t.ts.SetNodeState(goal, "met")
+			if err := t.ts.ProveGoal(goal, ev); err != nil {
+				return actool.Errorf("目标证明保存失败: " + err.Error()), nil
+			}
 			// 每标记一个目标 met，就检查本任务是否【所有目标】都已 met；若是，自动判定
 			// 任务完成（置 GoalMet），无需再依赖模型显式调 goal_met。
-			if goals, err := t.ts.ListByKind(db.KindGoal, 1000); err == nil && len(goals) > 0 {
-				allMet := true
-				for _, g := range goals {
-					if g.State != "met" {
-						allMet = false
-						break
-					}
-				}
+			if allMet, err := t.ts.AllGoalsMet(); err == nil {
 				if allMet {
 					t.GoalMet = true
-					t.Reason = fmt.Sprintf("所有 %d 个目标均已 met（最后由 goal %d 触发）", len(goals), goal)
+					t.Reason = fmt.Sprintf("全部目标已达成（最后由 goal %d 触发）", goal)
 					return actool.Text(fmt.Sprintf("goal %d marked met；本任务所有目标均已达成，任务自动判定完成", goal)), nil
 				}
 			}
@@ -1208,6 +1236,16 @@ func (t *ToolSet) goalMet() actool.CoreTool {
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
 			var a struct{ Reason string }
 			_ = json.Unmarshal(in, &a)
+			if t.ts == nil {
+				return actool.Errorf("缺少任务上下文"), nil
+			}
+			met, err := t.ts.AllGoalsMet()
+			if err != nil {
+				return actool.Errorf("目标状态读取失败: " + err.Error()), nil
+			}
+			if !met {
+				return actool.Errorf("尚有未证明的目标，请先使用 prove_goal 提交证据"), nil
+			}
 			t.GoalMet = true
 			t.Reason = a.Reason
 			return actool.Text("acknowledged: goal marked met"), nil
@@ -1339,12 +1377,13 @@ func (t *ToolSet) recordOneFact(it factItem, defaultIntent int64) (int64, error)
 		}
 	}
 	// a fact is its OWN node kind (distinct from a vuln finding).
-	id, err := t.ts.AddNode(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs))
+	var parents []int64
+	if intent > 0 {
+		parents = []int64{intent}
+	}
+	id, err := t.ts.AddNodeLinked(db.KindFact, payload, 5, "confirmed", t.worker, pidList(it.AssetIDs), parents, db.RelYields)
 	if err != nil {
 		return 0, err
-	}
-	if intent > 0 {
-		_ = t.ts.Link(intent, db.RelYields, id) // chain: intent -> fact
 	}
 	t.writes.Facts++
 	return id, nil
@@ -1459,14 +1498,15 @@ func (t *ToolSet) addOneGoal(it goalItem) (int64, error) {
 	if origin == "" {
 		origin = "system"
 	}
-	id, err := t.ts.AddNode(db.KindGoal, payload, 0, "open", origin, nil)
+	of, err := t.ts.OriginFactID()
 	if err != nil {
 		return 0, err
 	}
-	if of, _ := t.ts.OriginFactID(); of > 0 && id > 0 {
-		_ = t.ts.Link(of, db.RelSpawns, id) // goals descend from the task root (origin fact)
+	var parents []int64
+	if of > 0 {
+		parents = []int64{of}
 	}
-	return id, nil
+	return t.ts.AddNodeLinked(db.KindGoal, payload, 0, "open", origin, nil, parents, db.RelSpawns)
 }
 
 // setGoals 给【本任务】新增探索目标(goal 节点)。既是目标拆解器的提交工具,也是主
@@ -1494,6 +1534,20 @@ func (t *ToolSet) setGoals() actool.CoreTool {
 			items := a.Goals
 			if !batch {
 				items = []goalItem{a.goalItem}
+			}
+			if t.worker == "goals" {
+				payloads := make([]map[string]any, 0, len(items))
+				for _, item := range items {
+					if strings.TrimSpace(item.Text) == "" {
+						return actool.Errorf("text 不能为空"), nil
+					}
+					payloads = append(payloads, map[string]any{"text": strings.TrimSpace(item.Text), "vulnclass": strings.TrimSpace(item.VulnClass)})
+				}
+				ids, err := t.ts.CompleteBootstrap(payloads)
+				if err != nil {
+					return actool.Errorf("初始目标保存失败: " + err.Error()), nil
+				}
+				return jsonResult(map[string]any{"ids": ids})
 			}
 
 			ids := make([]int64, len(items))

@@ -202,7 +202,7 @@ func TestResumeDoesNotClearDeleteBarrier(t *testing.T) {
 	}
 }
 
-func TestBootstrapAdmissionClearsQueuedPauseBarrier(t *testing.T) {
+func TestBootstrapAdmissionPreservesPauseBarrierAfterShutdown(t *testing.T) {
 	e := NewEngine(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -211,7 +211,7 @@ func TestBootstrapAdmissionClearsQueuedPauseBarrier(t *testing.T) {
 	e.Pause(task.ID, agent.AbortPausedByUser)
 
 	s.startAdmittedTask(task, "bootstrap")
-	if e.IsPaused(task.ID) {
-		t.Fatal("bootstrap admission left the queued task behind the pause barrier")
+	if !e.IsPaused(task.ID) {
+		t.Fatal("bootstrap admission cleared the pause barrier after shutdown")
 	}
 }

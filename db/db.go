@@ -45,7 +45,7 @@ func isPostgresDeadlock(err error) bool {
 
 func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(time.Duration)) error {
 	for attempt := 0; ; attempt++ {
-		if _, err := execer.ExecContext(ctx, schemaSQL); err != nil {
+		if _, err := execer.ExecContext(ctx, schemaSQL+"\n"+triggerQueueSchema); err != nil {
 			if !isPostgresDeadlock(err) || attempt >= len(schemaDeadlockRetryDelays) {
 				return err
 			}

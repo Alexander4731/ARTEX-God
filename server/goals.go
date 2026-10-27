@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -40,7 +41,18 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 }
 
 func (s *Server) startTaskEngine(t *Task) {
+	ready, err := t.Store.BootstrapReady()
+	if err != nil {
+		log.Printf("[bootstrap] task %s 读取初始化状态失败: %v", t.ID, err)
+		return
+	}
+	if ready {
+		s.engine.Run(s.ctx, t)
+		return
+	}
 	ctx := s.engine.execContextFor(s.ctx, t.ID)
+	ctx, cancelBootstrap := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancelBootstrap()
 	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
 		return
 	}
@@ -49,6 +61,11 @@ func (s *Server) startTaskEngine(t *Task) {
 	goals := s.createGoals(ctx, t, func(r db.Activity) {
 		s.engine.emitActivity(t, r)
 	})
+	if ready, err := t.Store.BootstrapReady(); err != nil || !ready {
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true, Summary: "初始化未完成，请恢复任务以重试"})
+		s.engine.pauseForInput(t, "初始化未完成，请恢复任务以重试")
+		return
+	}
 	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
 		return
 	}
@@ -128,6 +145,11 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()
+	if unknown, err := s.m.pg.HasUnknownTaskExecution(t.ID); err != nil {
+		return false, err
+	} else if unknown {
+		return false, fmt.Errorf("存在结果未确认的工具操作，请先在审批记录中核验执行结果")
+	}
 	if requirePaused {
 		if isTerminalStatus(lifecycle.Status) {
 			return false, fmt.Errorf("终态任务不能执行继续")
@@ -225,6 +247,15 @@ func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 }
 
 func (s *Server) startAdmittedTask(t *Task, mode string) {
+	if s.ctx.Err() != nil {
+		return
+	}
+	if ready, err := t.Store.BootstrapReady(); err != nil {
+		log.Printf("[bootstrap] task %s: %v", t.ID, err)
+		return
+	} else if !ready {
+		mode = "bootstrap"
+	}
 	if mode == "bootstrap" {
 		if !s.engine.beginTaskOperation(t.ID) {
 			return
@@ -236,10 +267,12 @@ func (s *Server) startAdmittedTask(t *Task, mode string) {
 		if s.engine.IsPaused(t.ID) {
 			s.engine.Resume(t)
 		}
-		go func() {
+		if !s.background(func() {
 			defer s.engine.decInflight(t.ID)
 			s.startTaskEngine(t)
-		}()
+		}) {
+			s.engine.decInflight(t.ID)
+		}
 		return
 	}
 	s.engine.Run(s.ctx, t)
@@ -382,10 +415,8 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		as = s.m.Assets()
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-	s.engine.BeginLLMCall(t.ID)
 	goalRuntime := s.agentsForTask(t).runtime
 	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
-	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {
 			specs = append(specs, goalSpec{Text: g.Text, VulnClass: g.VulnClass})
@@ -397,10 +428,9 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		// only path that writes here — decomposed goals are already persisted by the tool.
 		if g := strings.TrimSpace(t.Goal); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
-			origin, _ := t.Store.OriginFactID()
-			id, _ := t.Store.AddNode(db.KindGoal, map[string]any{"text": g}, 0, "open", "system", nil)
-			if origin > 0 && id > 0 {
-				_ = t.Store.Link(origin, db.RelSpawns, id) // goal descends from the task root (origin fact)
+			if _, err := t.Store.CompleteBootstrap([]map[string]any{{"text": g}}); err != nil {
+				log.Printf("[bootstrap] task %s 目标保存失败: %v", t.ID, err)
+				return nil
 			}
 			specs = []goalSpec{{Text: g}}
 		}
