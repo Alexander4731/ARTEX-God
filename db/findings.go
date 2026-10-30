@@ -95,7 +95,7 @@ func (d *DB) AddFinding(taskID, nodeID int64, vulnclass, name, severity, summary
 	err := d.QueryRow(
 		`INSERT INTO findings (task_id, node_id, vulnclass, name, severity, summary, evidence, worker, asset_ids)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		tid, nid, vulnclass, name, severity, summary, evidence, worker, string(aidsJSON),
+		tid, nid, vulnclass, utf8Clean(name), severity, utf8Clean(summary), utf8Clean(evidence), worker, string(aidsJSON),
 	).Scan(&id)
 	return id, err
 }
@@ -427,7 +427,7 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 	}
 	var intentID int64
 	if err := tx.QueryRow(`INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
-		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, raw).Scan(&intentID); err != nil {
+		VALUES ($1,'intent',$2,10,'open','human') RETURNING id`, s.expID, jsonbClean(raw)).Scan(&intentID); err != nil {
 		return 0, Activity{}, err
 	}
 	if _, err := tx.Exec(`INSERT INTO exploration_anchors(node_id,asset_id)
@@ -450,6 +450,7 @@ func (s *ExplorationStore) AddFindingFollowUpIntent(findingID, findingNodeID int
 	if len(metadata) == 0 {
 		metadata = json.RawMessage(`{}`)
 	}
+	metadata = jsonbClean(metadata)
 	if err := tx.QueryRow(`
 INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
 VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14)

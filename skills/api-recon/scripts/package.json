@@ -3,7 +3,10 @@
   "version": "1.0.0",
   "private": true,
   "description": "Headless runtime API harvester for the api-recon skill",
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "dependencies": {
-    "puppeteer-core": "^23.11.1"
+    "puppeteer-core": "^25.16.0"
   }
 }

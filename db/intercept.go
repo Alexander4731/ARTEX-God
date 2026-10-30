@@ -131,7 +131,7 @@ func (d *DB) CreateInterceptPending(ruleID, convID int64, taskID, agentName, too
 	err := d.QueryRow(`
 INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, reason, decision_source, audit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, jsonbClean(raw), utf8Clean(reason), interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
@@ -167,7 +167,7 @@ func (d *DB) CreateDecidedIntercept(ruleID, convID int64, taskID, agentName, too
 	err := d.QueryRow(`
 INSERT INTO intercept_pending(rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, decision_source, audit)
 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
-		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, raw, status, reason, interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
+		ruleIDPtr, convIDPtr, taskIDPtr, agentName, toolName, jsonbClean(raw), status, utf8Clean(reason), interceptSource(ruleID, reason), firstAudit(audits)).Scan(&id)
 	return id, err
 }
 
@@ -262,7 +262,7 @@ func firstAudit(audits []*InterceptAudit) any {
 	if err != nil {
 		return nil
 	}
-	return raw
+	return jsonbClean(raw)
 }
 
 // ListAllIntercepts returns up to limit intercept_pending rows (newest first)

@@ -107,7 +107,7 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 		return nil, nil, false, err
 	}
 	r, err = scanRetest(tx.QueryRowContext(ctx, `INSERT INTO finding_retests(finding_id,conversation_id,notes,snapshot) VALUES ($1,$2,$3,$4) RETURNING `+retestCols,
-		findingID, c.ID, strings.TrimSpace(notes), snapshot))
+		findingID, c.ID, strings.TrimSpace(utf8Clean(notes)), snapshot))
 	if err != nil {
 		return nil, nil, false, err
 	}
@@ -165,7 +165,7 @@ func (d *DB) FindingRetestForConversation(ctx context.Context, conversationID in
 // a process restart (RecoverFindingRetests) able to clear it.
 func (d *DB) FailPendingRetestForConversation(conversationID int64, reason string) error {
 	_, err := d.Exec(`UPDATE finding_retests SET status='failed', error=$2, finished_at=now()
-		WHERE conversation_id=$1 AND status IN ('pending','running')`, conversationID, reason)
+		WHERE conversation_id=$1 AND status IN ('pending','running')`, conversationID, utf8Clean(reason))
 	return err
 }
 
@@ -184,7 +184,7 @@ func (d *DB) RecordFindingRetestResult(ctx context.Context, conversationID int64
 	if verdict != "reproduced" && verdict != "fixed" && verdict != "inconclusive" {
 		return errors.New("verdict 必须为 reproduced / fixed / inconclusive")
 	}
-	summary, evidence = strings.TrimSpace(summary), strings.TrimSpace(evidence)
+	summary, evidence = strings.TrimSpace(utf8Clean(summary)), strings.TrimSpace(utf8Clean(evidence))
 	if summary == "" || evidence == "" {
 		return errors.New("summary 与 evidence 不能为空；无法确认时说明实际检查及阻塞原因")
 	}
@@ -229,7 +229,7 @@ func (d *DB) FinishFindingRetest(id int64, status, reason string) error {
 	err = tx.QueryRow(`UPDATE finding_retests SET
 	status=CASE WHEN $2='completed' AND verdict='' THEN 'failed' ELSE $2 END,
 	error=CASE WHEN $2='completed' AND verdict='' THEN 'Agent 未保存复测结论，请查看会话后重新复测' ELSE $3 END,
-	finished_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING status,verdict`, id, status, reason).Scan(&finalStatus, &verdict)
+	finished_at=now() WHERE id=$1 AND status IN ('pending','running') RETURNING status,verdict`, id, status, utf8Clean(reason)).Scan(&finalStatus, &verdict)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil // A replay must not overwrite a later manual triage decision.
 	}

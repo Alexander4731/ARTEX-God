@@ -254,7 +254,7 @@ func (c Config) Provider() string {
 // limiter lives on the single provider instance — so planner + all workers +
 // main agent (which share this provider) are bounded by one shared rate limit.
 func (c Config) NewProvider() (llm.Provider, error) {
-	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
+	client, err := quotaAwareHTTPClient(c)
 	if err != nil {
 		return nil, err
 	}
@@ -277,9 +277,6 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	lc.RetryInterval = c.Retry.ConnectInterval
 	lc.EmptyResponseRetries = c.Retry.EmptyAttempts
 	lc.EmptyResponseInterval = c.Retry.EmptyInterval
-	if c.RatePerSecond > 0 || c.RatePerMinute > 0 {
-		lc.RateLimit = &llm.RateLimit{PerSecond: c.RatePerSecond, PerMinute: c.RatePerMinute}
-	}
 	return llm.NewProvider(lc)
 }
 
@@ -328,7 +325,8 @@ func IsQuotaExhaustedMessage(message string) bool {
 // 402 lets a task router fail over immediately while retaining the original
 // response body for provider-specific classification and audit logs.
 type quotaAwareTransport struct {
-	base http.RoundTripper
+	base  http.RoundTripper
+	pacer *requestPacer
 	// sessionHeaderKey, when non-empty, is the HTTP header name each request
 	// carries; its value is the session id read from the request context. Empty
 	// disables it. See Config.SessionHeaderKey.
@@ -336,7 +334,12 @@ type quotaAwareTransport struct {
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	if err := takeRequestAttempt(req.Context()); err != nil { return nil, err }
+	if err := takeRequestAttempt(req.Context()); err != nil {
+		return nil, err
+	}
+	if err := t.pacer.wait(req.Context()); err != nil {
+		return nil, err
+	}
 	// Custom session-id header: name is user-configured, value is THIS run's
 	// session id (norma stashes it on the context via transcript.WithSessionID).
 	// Stable across a session's turns and distinct across sessions — exactly what
@@ -405,9 +408,9 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
-func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
+func quotaAwareHTTPClient(c Config) (*http.Client, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
-	proxy = strings.TrimSpace(proxy)
+	proxy := strings.TrimSpace(c.Proxy)
 	if proxy == "" {
 		transport.Proxy = nil // 留空=直连,不回退 HTTP_PROXY/HTTPS_PROXY 环境变量
 	} else {
@@ -424,7 +427,10 @@ func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) 
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
+	return &http.Client{Transport: quotaAwareTransport{
+		base: transport, sessionHeaderKey: strings.TrimSpace(c.SessionHeaderKey),
+		pacer: newRequestPacer(c.RatePerSecond, c.RatePerMinute),
+	}}, nil
 }
 
 // logTestConnection prints the raw HTTP status code(s) and response body of a

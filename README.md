@@ -94,6 +94,8 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 > 依赖数据库 **PostgreSQL**；探索需配置 **LLM**（`ANTHROPIC_API_KEY` 或 `OPENAI_API_KEY`，也可在 UI 里配）。
 
+从源码构建建议使用 Node.js 22 LTS 或更新版本。`api-recon` 的浏览器采集脚本需要 Node.js ≥22.12 和 Chromium；容器镜像已包含这些运行依赖。
+
 ### 方式一：一键安装脚本（推荐）
 
 ```bash

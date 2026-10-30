@@ -233,7 +233,7 @@ func RecordNotificationEventTx(ctx context.Context, tx *sql.Tx, kind string, fin
 		return false
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO notification_events(kind,finding_id,snapshot) VALUES($1,$2,$3)`,
-		kind, findingID, string(raw)); err != nil {
+		kind, findingID, string(jsonbClean(raw))); err != nil {
 		log.Printf("[notify] 写入推送事件失败 finding=%d（漏洞记录不受影响）: %v", findingID, err)
 		// 回滚到保存点，把事务从 aborted 状态里救回来。
 		if _, rbErr := tx.ExecContext(ctx, `ROLLBACK TO SAVEPOINT notify_event`); rbErr != nil {
@@ -255,7 +255,7 @@ func (d *DB) AddNotificationEvent(ctx context.Context, kind string, findingID in
 	}
 	var id int64
 	err = d.QueryRowContext(ctx, `INSERT INTO notification_events(kind,finding_id,snapshot) VALUES($1,$2,$3) RETURNING id`,
-		kind, findingID, string(raw)).Scan(&id)
+		kind, findingID, string(jsonbClean(raw))).Scan(&id)
 	return id, err
 }
 

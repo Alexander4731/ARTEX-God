@@ -130,7 +130,7 @@ func (s *ExplorationStore) AddDigest(payload map[string]any, memberIDs []int64) 
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
 VALUES ($1, $2, $3, 0, $4, 'compactor') RETURNING id`,
-		s.expID, KindDigest, string(raw), StateDigestActive).Scan(&id); err != nil {
+		s.expID, KindDigest, string(jsonbClean(raw)), StateDigestActive).Scan(&id); err != nil {
 		return 0, err
 	}
 	for _, m := range memberIDs {

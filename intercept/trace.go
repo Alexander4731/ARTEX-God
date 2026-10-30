@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -195,7 +196,9 @@ func (i *Interceptor) bindResult(ctx context.Context, id int64, audit *db.Interc
 		return
 	}
 	t.bind(audit.ToolUseID, func(status, output string, cut bool) {
-		_ = i.db.CompleteIntercept(id, audit.RunID, audit.ToolUseID, status, output, cut)
+		if err := i.db.CompleteIntercept(id, audit.RunID, audit.ToolUseID, status, output, cut); err != nil {
+			log.Printf("[intercept] execution result update failed (approval=%d, tool_use_id=%s): %v", id, audit.ToolUseID, err)
+		}
 	})
 }
 

@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"regexp"
 	"strconv"
 	"strings"
@@ -683,7 +684,9 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 			return allowed && ctx.Err() == nil
 		case <-ctx.Done():
 			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
-			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
+			if err := i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false); err != nil {
+				log.Printf("[intercept] cancelled execution result update failed (approval=%d): %v", pendingID, err)
+			}
 			return false
 		}
 	}
@@ -714,7 +717,9 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		return allowed
 	case <-ctx.Done():
 		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
-		_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
+		if err := i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false); err != nil {
+			log.Printf("[intercept] cancelled execution result update failed (approval=%d): %v", pendingID, err)
+		}
 		return false
 	}
 }

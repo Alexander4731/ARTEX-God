@@ -1,0 +1,14 @@
+.git
+.local
+data
+web
+config.json
+jwt.key
+.env
+.env.*
+artex
+artex.exe
+*.log
+skills/**/node_modules
+skills/**/__pycache__
+skills/**/*.pyc

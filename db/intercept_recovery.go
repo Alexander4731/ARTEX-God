@@ -26,7 +26,7 @@ func (d *DB) HasUnknownTaskExecution(taskID string) (bool, error) {
 
 func (d *DB) ResolveUnknownExecution(ctx context.Context, id int64, status, note string) (bool, error) {
 	result, err := d.ExecContext(ctx, `UPDATE intercept_pending SET audit=audit || jsonb_build_object('execution_status',$2::text,'output',$3::text,'execution_ended_at',now(),'resolution_source','human')
-WHERE id=$1 AND audit->>'execution_status'='unknown'`, id, status, note)
+WHERE id=$1 AND audit->>'execution_status'='unknown'`, id, status, utf8Clean(note))
 	if err != nil {
 		return false, err
 	}

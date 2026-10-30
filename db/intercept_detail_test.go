@@ -88,6 +88,33 @@ func TestInterceptDetails(t *testing.T) {
 			t.Fatal("duplicate result rewrote output")
 		}
 	})
+	t.Run("binary tool output", func(t *testing.T) {
+		for _, status := range []string{"succeeded", "failed"} {
+			t.Run(status, func(t *testing.T) {
+				id := create(t, &InterceptAudit{RunID: "binary-run", ToolUseID: "binary-call", Correlation: "exact", InitialAction: "ask", IntentID: 36})
+				if _, err := d.ResolveIntercept(id, "allowed", "allow", "approved"); err != nil {
+					t.Fatal(err)
+				}
+				output := "PNG\x00header\x00中文 literal \\u0000 invalid \xff"
+				if err := d.CompleteIntercept(id, "binary-run", "binary-call", status, output, true); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.FinishIntentExecutionAudit("approval-detail-test", 36); err != nil {
+					t.Fatal(err)
+				}
+				got, err := d.GetInterceptDetail(id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got.Audit.ExecutionStatus != status || got.Audit.Output != "PNGheader中文 literal \\u0000 invalid �" || !got.Audit.OutputTruncated {
+					t.Fatalf("binary result not persisted: %+v", got.Audit)
+				}
+				if unknown, err := d.HasUnknownTaskExecution("approval-detail-test"); err != nil || unknown {
+					t.Fatalf("completed tool still blocks task: unknown=%v err=%v", unknown, err)
+				}
+			})
+		}
+	})
 	t.Run("denied output and timeout allow", func(t *testing.T) {
 		id := create(t, &InterceptAudit{RunID: "run", ToolUseID: "call", ExecutionStatus: "not_started"})
 		if _, err := d.ResolveIntercept(id, "denied", "deny", "人工拒绝"); err != nil {

@@ -206,7 +206,7 @@ func marshalJSONBArray(items []map[string]any) (string, error) {
 		}
 		// PostgreSQL array literal for jsonb[]: each element must be
 		// double-quoted with internal backslashes and double-quotes escaped.
-		s := strings.ReplaceAll(string(b), `\`, `\\`)
+		s := strings.ReplaceAll(string(jsonbClean(b)), `\`, `\\`)
 		s = strings.ReplaceAll(s, `"`, `\"`)
 		parts[i] = `"` + s + `"`
 	}

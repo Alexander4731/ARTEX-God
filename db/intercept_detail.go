@@ -89,7 +89,7 @@ func (d *DB) ResolveIntercept(id int64, status, action, reason string) (bool, er
 		audit=CASE WHEN audit IS NULL THEN NULL ELSE audit || $3::jsonb ||
         CASE WHEN $4='allow' AND audit->>'correlation' IS DISTINCT FROM 'exact'
         THEN '{"execution_status":"unknown"}'::jsonb ELSE '{}'::jsonb END END
-        WHERE id=$1 AND status='pending'`, id, status, patch, action)
+        WHERE id=$1 AND status='pending'`, id, status, jsonbClean(patch), action)
 	if err != nil {
 		return false, err
 	}
@@ -110,6 +110,6 @@ func (d *DB) CompleteIntercept(id int64, runID, toolUseID, status, output string
 	_, err = d.Exec(`UPDATE intercept_pending SET audit=audit || $4::jsonb
 		WHERE id=$1 AND audit->>'run_id'=$2 AND audit->>'tool_use_id'=$3
 		AND audit->>'effective_action'='allow' AND audit->>'execution_status'='awaiting_result'`,
-		id, runID, toolUseID, patch)
+		id, runID, toolUseID, jsonbClean(patch))
 	return err
 }

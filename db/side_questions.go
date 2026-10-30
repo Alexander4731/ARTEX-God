@@ -210,7 +210,7 @@ func (d *DB) UpdateSideRequest(ctx context.Context, e sidequestion.Exchange) (bo
 		return false, err
 	}
 	r, err := d.ExecContext(ctx, `UPDATE side_question_requests r SET answer=$2,status=$3,error=$4,sequence=$5,usage=$6,context_info=$7
-WHERE r.id=$1 AND r.status='running' AND r.sequence<$5 AND EXISTS(SELECT 1 FROM side_question_sessions s WHERE s.session_key=r.session_key AND s.generation=r.generation)`, e.ID, e.Answer, e.Status, e.Error, e.Sequence, string(usage), string(info))
+WHERE r.id=$1 AND r.status='running' AND r.sequence<$5 AND EXISTS(SELECT 1 FROM side_question_sessions s WHERE s.session_key=r.session_key AND s.generation=r.generation)`, e.ID, utf8Clean(e.Answer), e.Status, utf8Clean(e.Error), e.Sequence, string(usage), string(info))
 	if err != nil {
 		return false, err
 	}
@@ -271,7 +271,7 @@ func (d *DB) SaveSideMemory(ctx context.Context, e sidequestion.Exchange, memory
 		return err
 	}
 	result, err := d.ExecContext(ctx, `UPDATE side_question_sessions s SET memory=$3 WHERE s.session_key=$1 AND s.generation=$2
-AND EXISTS(SELECT 1 FROM side_question_requests r WHERE r.id=$4 AND r.session_key=s.session_key AND r.generation=s.generation AND r.status='running')`, e.SessionKey, e.Generation, string(raw), e.ID)
+AND EXISTS(SELECT 1 FROM side_question_requests r WHERE r.id=$4 AND r.session_key=s.session_key AND r.generation=s.generation AND r.status='running')`, e.SessionKey, e.Generation, string(jsonbClean(raw)), e.ID)
 	if err != nil {
 		return err
 	}
