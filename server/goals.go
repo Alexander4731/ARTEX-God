@@ -145,7 +145,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	}
 	defer s.engine.decInflight(t.ID)
 	lifecycle := t.lifecycleSnapshot()
-	if unknown, err := s.m.pg.HasUnknownTaskExecution(t.ID); err != nil {
+	if unknown, err := s.m.hasUnknownTaskExecution(t.ID); err != nil {
 		return false, err
 	} else if unknown {
 		return false, fmt.Errorf("存在结果未确认的工具操作，请先在审批记录中核验执行结果")

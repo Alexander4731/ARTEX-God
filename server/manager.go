@@ -22,6 +22,7 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 // Task is one engagement: a description + goal + its own exploration store,
@@ -811,6 +812,10 @@ func (m *Manager) AcquireRuntime(ctx context.Context, lost func(error)) (*pgdb.R
 		lock.Close()
 		return nil, err
 	}
+	if err := m.interceptor.RecoverExecutions(ctx, transcript.NewStore(filepath.Join(m.dir, "transcripts")), ""); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	if err := m.pg.RecoverIntercepts(); err != nil {
 		lock.Close()
 		return nil, err
@@ -820,6 +825,15 @@ func (m *Manager) AcquireRuntime(ctx context.Context, lost func(error)) (*pgdb.R
 		return nil, err
 	}
 	return lock, nil
+}
+
+func (m *Manager) hasUnknownTaskExecution(taskID string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := m.interceptor.RecoverExecutions(ctx, transcript.NewStore(filepath.Join(m.dir, "transcripts")), taskID); err != nil {
+		return false, err
+	}
+	return m.pg.HasUnknownTaskExecution(taskID)
 }
 
 // isTerminalStatus reports whether a task status is terminal (done/failed/timeout).

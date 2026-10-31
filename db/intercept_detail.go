@@ -21,6 +21,8 @@ type InterceptContextEntry struct {
 type InterceptAudit struct {
 	IntentID         int64                   `json:"intent_id,omitempty"`
 	RunID            string                  `json:"run_id,omitempty"`
+	SessionID        string                  `json:"session_id,omitempty"`
+	TranscriptOffset *int64                  `json:"transcript_offset,omitempty"`
 	ToolUseID        string                  `json:"tool_use_id,omitempty"`
 	Correlation      string                  `json:"correlation"` // exact | ambiguous | unavailable
 	InputDigest      string                  `json:"input_digest"`

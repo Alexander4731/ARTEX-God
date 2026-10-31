@@ -8,11 +8,13 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log"
+	"os"
 	"sync"
 	"time"
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/transcript"
 )
 
 const (
@@ -51,6 +53,7 @@ type Trace struct {
 	entries []db.InterceptContextEntry
 	cut     bool
 	calls   map[string]*tracedCall
+	store   *transcript.Store
 }
 
 func WithTrace(ctx context.Context, user string, prior []db.InterceptContextEntry) (context.Context, *Trace) {
@@ -61,6 +64,10 @@ func WithTrace(ctx context.Context, user string, prior []db.InterceptContextEntr
 	}
 	return context.WithValue(ctx, traceKey{}, t), t
 }
+
+// UseTranscript supplies the existing SDK log for recording the exact position
+// at which the pending assistant/tool-result pair will be appended.
+func (t *Trace) UseTranscript(store *transcript.Store) { t.store = store }
 
 func (t *Trace) append(e db.InterceptContextEntry) {
 	var cut bool
@@ -169,6 +176,13 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 	}
 	a.InitialAction, a.InitialReason = dec.Action, dec.Message
 	a.IntentID, _ = ctx.Value(intentKey{}).(int64)
+	a.SessionID = transcript.SessionIDFrom(ctx)
+	if t, _ := ctx.Value(traceKey{}).(*Trace); t != nil && t.store != nil && a.SessionID != "" {
+		if info, err := os.Stat(t.store.MainPath(a.SessionID)); err == nil {
+			offset := info.Size()
+			a.TranscriptOffset = &offset
+		}
+	}
 	a.ModelFallback = dec.ModelFallback
 	a.ModelInput, a.ModelInputDigest = dec.ModelInput, dec.ModelInputDigest
 	a.RuleName, a.ConfigDigest, a.ProfileID = dec.RuleName, dec.ConfigDigest, dec.ProfileID

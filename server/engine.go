@@ -1135,7 +1135,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			checkErr = e.m.pg.FinishIntentExecutionAudit(t.ID, intent.ID)
 		}
 		if checkErr == nil {
-			unknown, checkErr = e.m.pg.HasUnknownTaskExecution(t.ID)
+			unknown, checkErr = e.m.hasUnknownTaskExecution(t.ID)
 		}
 		if checkErr != nil {
 			if sleepCtx(ctx, time.Second) {
@@ -1178,7 +1178,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
-	if unknown, err := e.m.pg.HasUnknownTaskExecution(t.ID); err != nil {
+	if unknown, err := e.m.hasUnknownTaskExecution(t.ID); err != nil {
 		return err
 	} else if unknown {
 		return fmt.Errorf("请先在审批记录中核验未确认的工具执行结果")
