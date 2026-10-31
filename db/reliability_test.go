@@ -111,3 +111,27 @@ func TestRuntimeLockExcludesSecondExecutor(t *testing.T) {
 		t.Fatal("second executor acquired lock")
 	}
 }
+
+func TestRuntimeLockAllowsCompanyScopeMutation(t *testing.T) {
+	d := reliabilityDB(t)
+	lock, err := d.AcquireRuntimeLock(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lock.Close()
+
+	tx, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`SET LOCAL lock_timeout='2s'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := lockCompanyScopeMutation(tx); err != nil {
+		t.Fatalf("runtime ownership blocked company/asset mutation: %v", err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+}

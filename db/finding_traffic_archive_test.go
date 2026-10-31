@@ -7,9 +7,9 @@ import (
 )
 
 func TestFindingEvidenceLockNamespace(t *testing.T) {
-	for _, reserved := range []int64{7337741001, 7337741002, 7337741003} {
+	for _, reserved := range []int64{schemaMigrationLockKey, 7337741002, companyScopeMutationLock, runtimeLockKey} {
 		if findingEvidenceLockKey == reserved {
-			t.Fatal("evidence lock collides with migration/test/company lock")
+			t.Fatal("evidence lock collides with migration/test/company/runtime lock")
 		}
 	}
 }

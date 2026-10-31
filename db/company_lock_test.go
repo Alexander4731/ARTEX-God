@@ -2,14 +2,20 @@ package db
 
 import "testing"
 
-func TestCompanyScopeMutationLockDoesNotReuseInfrastructureLocks(t *testing.T) {
-	reserved := map[string]int64{
-		"schema migration":         7337741001,
+func TestAdvisoryLockNamespacesAreDistinct(t *testing.T) {
+	locks := map[string]int64{
+		"schema migration":         schemaMigrationLockKey,
 		"cross-package test suite": 7337741002,
+		"company scope mutation":   companyScopeMutationLock,
+		"finding evidence":         findingEvidenceLockKey,
+		"runtime ownership":        runtimeLockKey,
+		"finding retest":           7337741010,
 	}
-	for name, key := range reserved {
-		if companyScopeMutationLock == key {
-			t.Fatalf("company scope mutation lock reuses the %s advisory lock key %d", name, key)
+	seen := make(map[int64]string, len(locks))
+	for name, key := range locks {
+		if previous, exists := seen[key]; exists {
+			t.Errorf("%s and %s reuse advisory lock key %d", previous, name, key)
 		}
+		seen[key] = name
 	}
 }

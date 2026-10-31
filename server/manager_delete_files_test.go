@@ -18,6 +18,11 @@ func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
 	defer m.Close()
+	runtimeLock, err := m.pg.AcquireRuntimeLock(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeLock.Close()
 	task, err := m.CreateTask("seed ownership", "seed ownership", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)

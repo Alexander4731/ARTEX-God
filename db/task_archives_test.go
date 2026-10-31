@@ -132,6 +132,11 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	if err := d.EnsureLLMUsageTable(); err != nil {
 		t.Fatal(err)
 	}
+	runtimeLock, err := d.AcquireRuntimeLock(t.Context(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtimeLock.Close()
 	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{Name: "cold task"})
 	if err != nil {
 		t.Fatal(err)
