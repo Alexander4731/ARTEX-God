@@ -15,6 +15,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 type configuration struct {
@@ -66,7 +69,12 @@ func run(addr, proxy string, noBrowser bool) error {
 	if err := os.Chdir(root); err != nil {
 		return err
 	}
-	pgBin := filepath.Join(root, "runtime", "pgsql", "bin")
+	pgRoot, cleanup, err := postgresRoot(root)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	pgBin := filepath.Join(pgRoot, "runtime", "pgsql", "bin")
 	node := filepath.Join(root, "runtime", "node")
 	python := filepath.Join(root, "runtime", "python")
 	if err := os.Setenv("PATH", strings.Join([]string{node, python, pgBin, os.Getenv("PATH")}, string(os.PathListSeparator))); err != nil {
@@ -88,13 +96,13 @@ func run(addr, proxy string, noBrowser bool) error {
 	if err != nil {
 		return err
 	}
-	pgData := filepath.Join(root, "data", "postgres")
-	logs := filepath.Join(root, "data", "logs")
+	pgData := filepath.Join(pgRoot, "data", "postgres")
+	logs := filepath.Join(pgRoot, "data", "logs")
 	if err := os.MkdirAll(logs, 0700); err != nil {
 		return err
 	}
 	if _, err := os.Stat(filepath.Join(pgData, "PG_VERSION")); errors.Is(err, os.ErrNotExist) {
-		passwordFile, err := os.CreateTemp(filepath.Join(root, "data"), "initdb-password-")
+		passwordFile, err := os.CreateTemp(filepath.Join(pgRoot, "data"), "initdb-password-")
 		if err != nil {
 			return err
 		}
@@ -147,6 +155,61 @@ func run(addr, proxy string, noBrowser bool) error {
 	cmd := command("cmd.exe")
 	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: fmt.Sprintf("cmd.exe /d /s /c \"\"%s\" -addr=%s -proxy=%s\"", batch, addr, proxy)}
 	return cmd.Run()
+}
+
+// PostgreSQL's Windows utilities use ANSI paths when locating their binaries.
+// A private junction supplies an ASCII path while keeping data in the package.
+func postgresRoot(root string) (string, func(), error) {
+	ascii := func(value string) bool {
+		for _, r := range value {
+			if r > 127 {
+				return false
+			}
+		}
+		return true
+	}
+	if ascii(root) {
+		return root, func() {}, nil
+	}
+	base := filepath.Join(os.Getenv("PUBLIC"), "Documents")
+	if !filepath.IsAbs(base) || !ascii(base) {
+		return "", nil, errors.New("Windows public Documents directory must have an absolute ASCII path")
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return "", nil, err
+	}
+	sd, err := windows.SecurityDescriptorFromString("D:P(A;;FA;;;SY)(A;;FA;;;" + user.User.Sid.String() + ")")
+	if err != nil {
+		return "", nil, err
+	}
+	name := make([]byte, 12)
+	if _, err := rand.Read(name); err != nil {
+		return "", nil, err
+	}
+	directory := filepath.Join(base, "ARTEX-"+base64.RawURLEncoding.EncodeToString(name))
+	directoryPtr, err := windows.UTF16PtrFromString(directory)
+	if err != nil {
+		return "", nil, err
+	}
+	attributes := windows.SecurityAttributes{SecurityDescriptor: sd}
+	attributes.Length = uint32(unsafe.Sizeof(attributes))
+	if err := windows.CreateDirectory(directoryPtr, &attributes); err != nil {
+		return "", nil, fmt.Errorf("create PostgreSQL path alias: %w", err)
+	}
+	link := filepath.Join(directory, "package")
+	cleanup := func() {
+		os.Remove(link)
+		os.Remove(directory)
+	}
+	cmd := exec.Command("cmd.exe")
+	cmd.SysProcAttr = &syscall.SysProcAttr{CmdLine: `cmd.exe /d /c mklink /J "%ARTEX_JUNCTION_LINK%" "%ARTEX_JUNCTION_SOURCE%"`}
+	cmd.Env = append(os.Environ(), "ARTEX_JUNCTION_LINK="+link, "ARTEX_JUNCTION_SOURCE="+root)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		cleanup()
+		return "", nil, fmt.Errorf("create PostgreSQL path alias: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return link, cleanup, nil
 }
 
 func loadConfiguration(root string) (configuration, error) {

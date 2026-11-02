@@ -7,6 +7,10 @@ on:
         description: Release tag to test
         required: true
         type: string
+      release_id:
+        description: Release ID (published or draft)
+        required: true
+        type: string
 
 permissions:
   contents: write # GitHub requires push access to read draft releases.
@@ -22,12 +26,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_ID: ${{ inputs.release_id }}
         run: |
           $ErrorActionPreference = 'Stop'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
-          $releases = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases"
-          $release = $releases | Where-Object tag_name -eq $env:RELEASE_TAG
-          if (-not $release) { throw 'The requested release was not found.' }
+          if ($env:RELEASE_ID -notmatch '^\d+$') { throw 'Release ID must be numeric.' }
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/$env:RELEASE_ID"
           $name = "artex-$($env:RELEASE_TAG.TrimStart('v'))-windows-amd64.zip"
           $zip = Join-Path $env:RUNNER_TEMP $name
           $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS'
