@@ -9,7 +9,7 @@ on:
         type: string
 
 permissions:
-  contents: read
+  contents: write # GitHub requires push access to read draft releases.
 
 jobs:
   smoke:
@@ -25,8 +25,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
-          $tag = [uri]::EscapeDataString($env:RELEASE_TAG)
-          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $releases = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases"
+          $release = $releases | Where-Object tag_name -eq $env:RELEASE_TAG
+          if (-not $release) { throw 'The requested release was not found.' }
           $name = "artex-$($env:RELEASE_TAG.TrimStart('v'))-windows-amd64.zip"
           $zip = Join-Path $env:RUNNER_TEMP $name
           $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS'
