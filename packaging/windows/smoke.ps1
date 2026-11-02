@@ -74,7 +74,11 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'The bundled Chrome browser test failed.' }
     $result.browser = $browser | ConvertFrom-Json
     $body = @{password = 'PortableSmoke!2026'} | ConvertTo-Json
-    $null = Invoke-RestMethod -Method Post -Uri "$url/api/auth/init" -ContentType 'application/json' -Body $body
+    $auth = Invoke-RestMethod -Method Post -Uri "$url/api/auth/init" -ContentType 'application/json' -Body $body
+    $headers = @{Authorization = "Bearer $($auth.token)"}
+    $settings = Invoke-RestMethod -Headers $headers -Uri "$url/api/settings"
+    $result.python_detected = $settings.python_interpreter -eq (Join-Path $root 'runtime\python\python3.exe')
+    if (-not $result.python_detected) { throw 'ARTEX did not detect the bundled Python path correctly.' }
     $result.admin_initialized = (Invoke-RestMethod -Uri "$url/api/auth/status").initialized
     $initialPort = $cfg.database.port
     Stop-Portable
@@ -83,7 +87,7 @@ try {
     $cfg2 = Get-Content -LiteralPath (Join-Path $root 'config.json') -Raw | ConvertFrom-Json
     $status2 = Invoke-RestMethod -Uri "$url/api/auth/status"
     $result.restart = $status2.initialized -and $initialPort -eq $cfg2.database.port -and $cfg.database.password -eq $cfg2.database.password
-    $result.passed = $result.isolated_path -and $result.fresh_admin_setup -and $result.generated_password -and $result.database_query -and $result.browser.passed -and $result.admin_initialized -and $result.restart -and $result.local_database_host -eq '127.0.0.1'
+    $result.passed = $result.isolated_path -and $result.fresh_admin_setup -and $result.generated_password -and $result.database_query -and $result.browser.passed -and $result.python_detected -and $result.admin_initialized -and $result.restart -and $result.local_database_host -eq '127.0.0.1'
     if (-not $result.passed) { throw 'A portable package acceptance check failed.' }
 } catch {
     $result.error = $_.Exception.Message

@@ -38,6 +38,8 @@ if ($LASTEXITCODE -ge 8) { throw 'Copying npm failed.' }
 $python = Join-Path $runtime 'python'
 Expand-Archive -LiteralPath $PythonArchive -DestinationPath $python
 Copy-Item -LiteralPath (Join-Path $python 'python.exe') -Destination (Join-Path $python 'python3.exe')
+& (Join-Path $python 'python.exe') (Join-Path $PSScriptRoot 'enable_utf8.py') (Join-Path $runtime 'pgsql\bin')
+if ($LASTEXITCODE -ne 0) { throw 'Enabling PostgreSQL UTF-8 paths failed.' }
 if ($ChromeRoot) {
     & robocopy.exe $ChromeRoot (Join-Path $runtime 'chrome') /E /R:0 /W:0 /MT:8 /NFL /NDL /NJH /NJS /NP
     if ($LASTEXITCODE -ge 8) { throw 'Copying Chrome failed.' }
