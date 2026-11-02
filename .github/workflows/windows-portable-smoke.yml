@@ -1,0 +1,56 @@
+name: Windows portable smoke test
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to test
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  smoke:
+    runs-on: windows-2025
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download and verify the release package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json' }
+          $tag = [uri]::EscapeDataString($env:RELEASE_TAG)
+          $release = Invoke-RestMethod -Headers $headers -Uri "https://api.github.com/repos/$env:GITHUB_REPOSITORY/releases/tags/$tag"
+          $name = "artex-$($env:RELEASE_TAG.TrimStart('v'))-windows-amd64.zip"
+          $zip = Join-Path $env:RUNNER_TEMP $name
+          $sums = Join-Path $env:RUNNER_TEMP 'SHA256SUMS'
+          foreach ($entry in @(@{Name=$name;Path=$zip}, @{Name='SHA256SUMS';Path=$sums})) {
+            $asset = $release.assets | Where-Object name -eq $entry.Name
+            if (-not $asset) { throw "Missing release asset: $($entry.Name)" }
+            & curl.exe --fail --silent --show-error --location --header "Authorization: Bearer $env:GH_TOKEN" --header 'Accept: application/octet-stream' --output $entry.Path $asset.url
+            if ($LASTEXITCODE -ne 0) { throw 'Downloading the release asset failed.' }
+          }
+          $line = Get-Content -LiteralPath $sums | Where-Object { $_.EndsWith("  $name") }
+          if (-not $line -or (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash.ToLowerInvariant() -ne $line.Substring(0, 64)) {
+            throw 'The release package checksum does not match.'
+          }
+          $destination = Join-Path $env:RUNNER_TEMP 'ARTEX 全新环境'
+          Expand-Archive -LiteralPath $zip -DestinationPath $destination
+          $package = Join-Path $destination $name.Replace('.zip', '')
+          "PORTABLE_PACKAGE=$package" >> $env:GITHUB_ENV
+      - name: Test the bundled runtimes and first launch
+        shell: pwsh
+        run: |
+          ./packaging/windows/smoke.ps1 -PackageDirectory $env:PORTABLE_PACKAGE -OutputDirectory "$env:RUNNER_TEMP/portable-smoke"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-portable-smoke
+          path: ${{ runner.temp }}/portable-smoke
+          if-no-files-found: ignore
