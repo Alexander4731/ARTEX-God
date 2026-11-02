@@ -29,7 +29,7 @@ import (
 // messages, not dozens of fragments.
 func captureRun(ctx context.Context, opts agentcore.Options, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
 	opts.Hooks = guard.WithToolReview(opts.Hooks, opts.Tools)
-	s := agentcore.NewSession(opts)
+	s := newAgentSession(opts)
 	defer s.Close() // release the session's background-task manager (temp dir + processes)
 	return captureRunSession(ctx, s, opts.Transcript, input, emit)
 }

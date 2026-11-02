@@ -150,6 +150,11 @@ func (t *Trace) Complete(id, output string, isError bool) {
 	status := "succeeded"
 	if isError {
 		status = "failed"
+		// The SDK synthesizes this when cancellation stops waiting for a tool;
+		// it is not evidence that the underlying operation actually failed.
+		if output == "tool execution interrupted" {
+			status = "unknown"
+		}
 	}
 	out, cut := bounded(output, outputLimit)
 	c.complete(status, out, cut)

@@ -117,6 +117,29 @@ func TestTraceBoundsAndMissingResult(t *testing.T) {
 	}
 }
 
+func TestTraceCancellationResultRemainsUnconfirmed(t *testing.T) {
+	for _, tc := range []struct {
+		output, status string
+		isError        bool
+	}{
+		{"tool execution interrupted", "unknown", true},
+		{"Error: context canceled", "failed", true},
+		{"tool execution interrupted", "succeeded", false},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			_, trace := WithTrace(t.Context(), "test", nil)
+			trace.Start("call", "Bash", []byte(`{}`))
+			got := ""
+			trace.bind("call", func(status, _ string, _ bool) { got = status })
+			trace.Complete("call", tc.output, tc.isError)
+			trace.Finish()
+			if got != tc.status {
+				t.Fatalf("execution status=%s, want %s", got, tc.status)
+			}
+		})
+	}
+}
+
 func TestTraceConcurrentDistinctCalls(t *testing.T) {
 	ctx, trace := WithTrace(context.Background(), "test", nil)
 	var wg sync.WaitGroup
