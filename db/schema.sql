@@ -1121,6 +1121,9 @@ CREATE INDEX IF NOT EXISTS idx_intercept_pending_task   ON intercept_pending(tas
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT '';
 -- Detail payloads are lazy-loaded; NULL preserves the meaning of legacy history.
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS audit JSONB;
+-- Poll the small unresolved queue without scanning settled execution history.
+CREATE INDEX IF NOT EXISTS idx_intercept_actionable ON intercept_pending(task_id, created_at, id)
+WHERE status='pending' OR audit->>'execution_status'='unknown';
 ALTER TABLE intercept_pending ADD COLUMN IF NOT EXISTS decision_source TEXT NOT NULL DEFAULT '';
 UPDATE intercept_pending SET decision_source=CASE WHEN rule_id IS NOT NULL THEN 'rule'
  WHEN reason LIKE '[模型]%' THEN 'model' ELSE 'unknown' END WHERE decision_source='';

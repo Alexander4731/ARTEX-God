@@ -81,6 +81,8 @@ type Task struct {
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
 	Name          string
+	Description   string
+	Goal          string
 	PinnedAt      int64
 	Status        string
 	Paused        bool
@@ -108,6 +110,8 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
 		Name:          t.Name,
+		Description:   t.Description,
+		Goal:          t.Goal,
 		PinnedAt:      t.PinnedAt,
 		Status:        t.Status,
 		Paused:        t.Paused,
@@ -132,6 +136,8 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	state := t.lifecycleSnapshotLocked()
 	update(&state)
 	t.Name = state.Name
+	t.Description = state.Description
+	t.Goal = state.Goal
 	t.PinnedAt = state.PinnedAt
 	t.Status = state.Status
 	t.Paused = state.Paused
@@ -898,6 +904,8 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 	}
 	task.updateLifecycle(func(state *taskLifecycleState) {
 		state.Name = updated.Name
+		state.Description = updated.Description
+		state.Goal = updated.Goal
 		state.PinnedAt = unixOrZero(updated.PinnedAt)
 	})
 	return task, nil

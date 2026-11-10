@@ -140,6 +140,10 @@ func resultText(blocks []llm.ContentBlock) string {
 // new execution evidence. Never infer a result from a reused call ID alone.
 func recordedExecution(records []transcript.Record, session string, execution db.UnsettledExecution) (llm.ContentBlock, time.Time, bool) {
 	audit := execution.Audit
+	callTool := execution.ToolName
+	if audit.TranscriptTool != "" {
+		callTool = audit.TranscriptTool
+	}
 	if audit.RunID == "" || audit.ToolUseID == "" || audit.InputDigest == "" || audit.CapturedAt.IsZero() {
 		return llm.ContentBlock{}, time.Time{}, false
 	}
@@ -189,7 +193,7 @@ func recordedExecution(records []transcript.Record, session string, execution db
 		for _, block := range record.Message.Content {
 			if block.Type == llm.BlockToolUse && block.ID == audit.ToolUseID {
 				uses++
-				if !stamp.Before(audit.CapturedAt) && record.Message.Role == llm.RoleAssistant && block.Name == execution.ToolName && digestInput(block.Input) == audit.InputDigest {
+				if !stamp.Before(audit.CapturedAt) && record.Message.Role == llm.RoleAssistant && block.Name == callTool && digestInput(block.Input) == audit.InputDigest {
 					call = record
 				}
 			}

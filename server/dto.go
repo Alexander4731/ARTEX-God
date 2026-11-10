@@ -117,8 +117,8 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CategoryName:       lifecycle.CategoryName,
 		Pinned:             lifecycle.PinnedAt > 0,
 		PinnedAt:           completedRFC(lifecycle.PinnedAt),
-		Description:        t.Description,
-		Goal:               t.Goal,
+		Description:        lifecycle.Description,
+		Goal:               lifecycle.Goal,
 		Status:             status,
 		CreatedAt:          rfc3339(time.Unix(t.CreatedAt, 0)),
 		CreatedUnix:        t.CreatedAt,
@@ -404,7 +404,7 @@ func findingDTO(n *db.Node) FindingDTO {
 // nodes with no row keep the 'pending' default and no finding_id (not editable).
 // assets pre-resolves the anchored asset rows for label rendering.
 func findingDTOsForTask(t *Task, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {
-	return findingDTOsForOwner(t.ID, t.Description, in, meta, assets)
+	return findingDTOsForOwner(t.ID, t.lifecycleSnapshot().Description, in, meta, assets)
 }
 
 func findingDTOsForOwner(taskID, description string, in []*db.Node, meta map[int64]db.FindingMeta, assets map[int64]*db.Asset) []FindingDTO {

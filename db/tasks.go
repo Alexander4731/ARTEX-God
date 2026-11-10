@@ -483,28 +483,58 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 	return out, nil
 }
 
-// TaskPatch updates task list metadata without changing execution state.
+// TaskPatch updates task metadata and paused/terminal content without restarting.
 type TaskPatch struct {
-	Name   *string
-	Pinned *bool
+	Name        *string
+	Pinned      *bool
+	Description *string
+	Goal        *string
 }
 
-// UpdateTask applies a partial task name/pin mutation and returns the updated row.
+var ErrTaskContentRunning = errors.New("请先暂停任务，再修改描述和目的")
+
+// UpdateTask applies a partial task edit and returns the updated row.
 // Re-pinning an already pinned task preserves its original position.
 func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
-	task, err := scanTask(d.QueryRow(`UPDATE tasks SET
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	current, err := scanTask(tx.QueryRow(`SELECT `+taskCols+` FROM tasks WHERE id=$1 AND deleted_at IS NULL FOR UPDATE`, id))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	contentChanged := (patch.Description != nil && *patch.Description != current.Description) || (patch.Goal != nil && *patch.Goal != current.Goal)
+	if contentChanged && !current.Paused && current.Status != "done" && current.Status != "failed" && current.Status != "timeout" {
+		return nil, ErrTaskContentRunning
+	}
+	task, err := scanTask(tx.QueryRow(`UPDATE tasks SET
 	name = CASE WHEN $2::boolean THEN $3 ELSE name END,
+	description = COALESCE($5, description),
+	goal = COALESCE($6, goal),
 	pinned_at = CASE
 		WHEN $4::boolean IS NULL THEN pinned_at
 		WHEN $4::boolean THEN COALESCE(pinned_at, now())
 		ELSE NULL
 	END
 WHERE id=$1 AND deleted_at IS NULL
-RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned))
+RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Description, patch.Goal))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
+		return nil, err
+	}
+	if contentChanged {
+		if _, err := tx.Exec(`UPDATE explorations SET description=$2, goal=$3 WHERE id=$1`, task.ExplorationID, task.Description, task.Goal); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return task, nil

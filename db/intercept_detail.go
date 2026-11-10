@@ -24,6 +24,7 @@ type InterceptAudit struct {
 	SessionID        string                  `json:"session_id,omitempty"`
 	TranscriptOffset *int64                  `json:"transcript_offset,omitempty"`
 	ToolUseID        string                  `json:"tool_use_id,omitempty"`
+	TranscriptTool   string                  `json:"transcript_tool,omitempty"`
 	Correlation      string                  `json:"correlation"` // exact | ambiguous | unavailable
 	InputDigest      string                  `json:"input_digest"`
 	UserMessage      string                  `json:"user_message"`
@@ -58,7 +59,7 @@ func (d *DB) GetInterceptDetail(id int64) (*InterceptDetail, error) {
 	err := d.QueryRow(approvalRowSelectWithAudit+` WHERE ip.id=$1`, id).Scan(
 		&out.ID, &out.RuleID, &out.ConversationID, &out.TaskID, &out.AgentName,
 		&out.ToolName, &out.ToolInput, &out.Status, &out.Reason, &out.DecidedAt, &out.CreatedAt,
-		&out.DecisionSource, &out.ConvTitle, &out.ConvAgentKey, &out.RuleName, &raw,
+		&out.DecisionSource, &out.ConvTitle, &out.ConvAgentKey, &out.RuleName, &out.ExecutionStatus, &raw,
 	)
 	if err == sql.ErrNoRows {
 		return nil, nil

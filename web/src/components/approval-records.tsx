@@ -31,7 +31,6 @@ import type {
   InterceptApprovalRow,
   InterceptAudit,
   InterceptDetail,
-  InterceptPending,
   InterceptReviewInput,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -99,7 +98,8 @@ function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; de
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status, executionStatus }: { status: string; executionStatus?: string }) {
+  if (executionStatus === "unknown") return <Badge variant="destructive">执行结果待核验</Badge>;
   const labels: Record<string, string> = { pending: "待审批", allowed: "已允许", denied: "已拒绝", timeout: "已超时" };
   let variant: "default" | "destructive" | "secondary" | "outline" = "outline";
   if (status === "allowed") variant = "default";
@@ -315,7 +315,11 @@ export function ApprovalDetail({
         setDetail(next);
         setError("");
         if (next.status !== "pending") onResolved?.(next.status);
-        if (next.status === "pending" || next.audit?.execution_status === "awaiting_result")
+        if (
+          next.status === "pending" ||
+          next.audit?.execution_status === "awaiting_result" ||
+          next.audit?.execution_status === "unknown"
+        )
           timer = setTimeout(() => void load(), 5000);
       } catch (e) {
         if (!cancelled) setError((e as Error).message || "详情加载失败");
@@ -326,7 +330,7 @@ export function ApprovalDetail({
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [row.id, row.status, revision, retry, onResolved]);
+  }, [row.id, row.status, row.execution_status, revision, retry, onResolved]);
 
   // Row updates are authoritative until the lazy detail has caught up.
   const current = detail?.status === row.status ? detail : row;
@@ -335,6 +339,7 @@ export function ApprovalDetail({
     setResolving(true);
     try {
       await api.resolveExecution(row.id, status, resolutionNote);
+      toast.success("核验结果已保存；全部核验完成后可继续任务");
       setRetry((value) => value + 1);
     } catch (error) {
       setError((error as Error).message);
@@ -344,7 +349,7 @@ export function ApprovalDetail({
   }
   let execution = audit ? executionLabels[audit.execution_status] : "未记录";
   if (row.status === "pending") execution = "尚未执行";
-  if (audit && audit.correlation !== "exact" && audit.effective_action === "allow") execution = "未关联执行结果";
+  if (audit && audit.correlation !== "exact" && audit.execution_status === "unknown") execution = "未关联执行结果";
   const command = typeof row.tool_input?.command === "string" ? row.tool_input.command : undefined;
   let initialLabel = source(row) === "model" ? "模型初判" : "规则初判";
   if (audit?.model_fallback) initialLabel = "模型异常回退";
@@ -379,7 +384,10 @@ export function ApprovalDetail({
             {current.status === "pending" ? "审查状态" : "审批裁决"}
           </h3>
           <div className="flex flex-wrap items-center gap-2">
-            <StatusBadge status={current.status} />
+            <StatusBadge
+              status={current.status}
+              executionStatus={audit?.execution_status ?? current.execution_status}
+            />
             <MatchCell row={current} showReason={false} />
           </div>
           <p className="whitespace-pre-wrap break-words text-sm leading-7 [overflow-wrap:anywhere]">
@@ -429,6 +437,46 @@ export function ApprovalDetail({
         <Alert>
           <AlertDescription>此记录未保存审批详情快照，无法还原当时的上下文、模型初判和执行输出。</AlertDescription>
         </Alert>
+      ) : null}
+      {!readOnly && audit?.execution_status === "unknown" ? (
+        <div className="space-y-2 rounded-lg border border-amber-500/40 p-4">
+          <p className="text-sm">该操作已经获批，但执行结果尚未确认，因此任务已暂停。请核验结果后继续任务。</p>
+          <label className="text-sm" htmlFor={`execution-note-${row.id}`}>
+            核验依据
+          </label>
+          <textarea
+            id={`execution-note-${row.id}`}
+            className="min-h-20 w-full rounded-md border p-2 text-sm"
+            value={resolutionNote}
+            onChange={(event) => setResolutionNote(event.target.value)}
+            placeholder="检查目标系统或执行日志后，记录实际结果"
+          />
+          <div className="flex flex-wrap gap-2">
+            <Button
+              size="sm"
+              disabled={resolving || !resolutionNote.trim()}
+              onClick={() => void resolveExecution("succeeded")}
+            >
+              已确认成功
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={resolving || !resolutionNote.trim()}
+              onClick={() => void resolveExecution("failed")}
+            >
+              已确认失败
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={resolving || !resolutionNote.trim()}
+              onClick={() => void resolveExecution("not_executed")}
+            >
+              已确认未执行
+            </Button>
+          </div>
+        </div>
       ) : null}
       {audit ? (
         <Collapsible open={more} onOpenChange={setMore}>
@@ -504,45 +552,6 @@ export function ApprovalDetail({
                 text={audit.output ?? (audit.execution_status === "not_executed" ? "工具未执行。" : "尚无执行输出")}
                 truncated={audit.output_truncated}
               />
-              {!readOnly && audit.execution_status === "unknown" ? (
-                <div className="space-y-2">
-                  <label className="text-sm" htmlFor={`execution-note-${row.id}`}>
-                    核验依据
-                  </label>
-                  <textarea
-                    id={`execution-note-${row.id}`}
-                    className="min-h-20 w-full rounded-md border p-2 text-sm"
-                    value={resolutionNote}
-                    onChange={(event) => setResolutionNote(event.target.value)}
-                    placeholder="检查目标系统或执行日志后，记录实际结果"
-                  />
-                  <div className="flex flex-wrap gap-2">
-                    <Button
-                      size="sm"
-                      disabled={resolving || !resolutionNote.trim()}
-                      onClick={() => void resolveExecution("succeeded")}
-                    >
-                      已确认成功
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={resolving || !resolutionNote.trim()}
-                      onClick={() => void resolveExecution("failed")}
-                    >
-                      已确认失败
-                    </Button>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      disabled={resolving || !resolutionNote.trim()}
-                      onClick={() => void resolveExecution("not_executed")}
-                    >
-                      已确认未执行
-                    </Button>
-                  </div>
-                </div>
-              ) : null}
               {audit.correlation !== "exact" ? (
                 <Alert>
                   <AlertDescription>
@@ -673,7 +682,7 @@ function ApprovalTable({
                   <code className="block truncate text-muted-foreground text-xs">{JSON.stringify(row.tool_input)}</code>
                 </TableCell>
                 <TableCell>
-                  <StatusBadge status={row.status} />
+                  <StatusBadge status={row.status} executionStatus={row.execution_status} />
                 </TableCell>
                 <TableCell className="hidden text-muted-foreground text-xs lg:table-cell">
                   {fmtTime(row.created_at)}
@@ -701,7 +710,7 @@ function ApprovalTable({
 
 export function ApprovalRecords({ taskId }: { taskId?: string }) {
   const [rows, setRows] = React.useState<InterceptApprovalRow[]>([]);
-  const [pendingRows, setPendingRows] = React.useState<InterceptPending[]>([]);
+  const [pendingRows, setPendingRows] = React.useState<InterceptApprovalRow[]>([]);
   const [page, setPage] = React.useState(1);
   const [pageSize, setPageSize] = React.useState(20);
   const [total, setTotal] = React.useState(0);
@@ -736,7 +745,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
           taskId
             ? api.interceptTaskPage(taskId, page, pageSize, filter)
             : api.interceptHistoryPage(page, pageSize, filter),
-          api.interceptPending(),
+          api.interceptActionable(taskId),
         ]);
         if (id !== request.current) return;
         if (history.status === "fulfilled") {
@@ -819,16 +828,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
     }
   };
 
-  const historyById = new Map(rows.map((row) => [row.id, row]));
-  const pending: InterceptApprovalRow[] = pendingRows
-    .filter((row) => !taskId || row.task_id === taskId)
-    .map((row) => ({
-      conv_title: "",
-      conv_agent_key: "",
-      rule_name: row.rule_id ? `规则 #${row.rule_id}` : "",
-      ...historyById.get(row.id),
-      ...row,
-    }));
+  const pending = pendingRows.filter((row) => !taskId || row.task_id === taskId);
   const title = taskId ? "拦截审批" : "审批记录";
   return (
     <div className="flex min-w-0 flex-col gap-5">
@@ -836,7 +836,7 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
         <div className="flex items-center gap-2">
           <ClipboardListIcon className="size-5 text-muted-foreground" />
           <h1 className="font-semibold text-xl">{title}</h1>
-          {pending.length ? <Badge variant="secondary">{pending.length} 待审批</Badge> : null}
+          {pending.length ? <Badge variant="secondary">{pending.length} 待处理</Badge> : null}
         </div>
         <Button variant="outline" size="sm" onClick={() => void load(true)} disabled={loading || refreshing}>
           <RefreshCwIcon data-icon="inline-start" className={cn(refreshing && "animate-spin")} />
@@ -907,14 +907,14 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
       ) : null}
       {pendingError ? (
         <Alert variant="destructive">
-          <AlertDescription>待审批加载失败：{pendingError}。请点击刷新重试。</AlertDescription>
+          <AlertDescription>待处理记录加载失败：{pendingError}。请点击刷新重试。</AlertDescription>
         </Alert>
       ) : null}
       {pending.length ? (
         <section className="overflow-hidden rounded-xl border">
           <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-3 font-medium text-sm">
             <ShieldAlertIcon className="size-4" />
-            待处理（{pending.length}）<span className="text-muted-foreground text-xs">展开后允许或拒绝</span>
+            待处理（{pending.length}）<span className="text-muted-foreground text-xs">展开后审批或核验执行结果</span>
           </div>
           <ApprovalTable rows={pending} busy={deciding} decide={decide} revision={revision} label="待处理审批" />
         </section>

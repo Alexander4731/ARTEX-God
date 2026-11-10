@@ -223,6 +223,19 @@ func (s *Server) interceptListPending(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"pending": pending})
 }
 
+func (s *Server) interceptListActionable(w http.ResponseWriter, r *http.Request) {
+	pg := s.pg(w)
+	if pg == nil {
+		return
+	}
+	rows, err := pg.ListActionableIntercepts(r.URL.Query().Get("task_id"))
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"items": rows})
+}
+
 func (s *Server) interceptGetOne(w http.ResponseWriter, r *http.Request) {
 	pg := s.pg(w)
 	if pg == nil {

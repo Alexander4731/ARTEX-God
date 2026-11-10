@@ -944,6 +944,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/asset-intercept/rules/{id}/toggle", s.assetInterceptToggleRule)
 
 	mux.HandleFunc("GET /api/intercept/pending", s.interceptListPending)
+	mux.HandleFunc("GET /api/intercept/actionable", s.interceptListActionable)
 	mux.HandleFunc("GET /api/intercept/pending/{id}", s.interceptGetOne)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/decide", s.interceptDecide)
 	mux.HandleFunc("POST /api/intercept/pending/{id}/resolve-execution", s.interceptResolveExecution)
@@ -1045,7 +1046,7 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 	out["engine_mode"] = engineMode
 
 	out["active_task"] = map[string]any{
-		"id": t.ID, "description": t.Description, "goal": t.Goal,
+		"id": t.ID, "description": t.lifecycleSnapshot().Description, "goal": t.lifecycleSnapshot().Goal,
 		"running":         running,
 		"paused":          paused,
 		"engine_mode":     engineMode,
@@ -1751,7 +1752,8 @@ func (s *Server) seed(t *Task, text string) {
 // origin fact (RelDerivedFrom) so it still traces back to a fact node. Best-effort —
 // a failure just falls back to the normal planner-driven flow.
 func (s *Server) seedFirstIntent(t *Task) {
-	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", t.Goal, t.Description)
+	content := t.lifecycleSnapshot()
+	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", content.Goal, content.Description)
 	id, err := t.Store.AddIntent(map[string]any{"summary": summary}, 8, nil, "seed")
 	if err != nil {
 		log.Printf("[seed] task %s: 下发种子意图失败: %v", t.ID, err)
@@ -3786,7 +3788,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
-			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
+			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.lifecycleSnapshot().Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
 			}
@@ -3893,7 +3895,7 @@ func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	md := report.Markdown(report.Input{
-		Title: t.Description, Goal: t.Goal, GeneratedAt: time.Now(),
+		Title: t.lifecycleSnapshot().Description, Goal: t.lifecycleSnapshot().Goal, GeneratedAt: time.Now(),
 		AssetCounts: counts, Findings: findings,
 	})
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")

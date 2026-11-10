@@ -39,12 +39,12 @@ type tracedCall struct {
 	audit     db.InterceptAudit
 	claimed   bool
 	ambiguous bool
-	complete  completion
+	complete  []completion
 }
 
-// Trace belongs to ONE Prompt invocation. SDK v0.3.6 hooks omit the tool ID;
-// correlate only when exactly one outstanding event has matching input. Never
-// guess between simultaneous identical requests, even when results arrive FIFO.
+// Trace belongs to ONE Prompt invocation. Wrapped tools supply their execution
+// ID; SDK-owned pre-hooks fall back to matching exactly one outstanding event.
+// Never guess between identical requests when the actual ID is unavailable.
 type Trace struct {
 	mu      sync.Mutex
 	runID   string
@@ -92,10 +92,29 @@ func (t *Trace) Start(id, tool string, input []byte) {
 	defer t.mu.Unlock()
 	t.calls[id] = &tracedCall{key: tool + ":" + digestInput(input), audit: db.InterceptAudit{
 		RunID: t.runID, ToolUseID: id, Correlation: "exact", InputDigest: digestInput(input),
-		UserMessage: t.user, UserTruncated: t.userCut, CapturedAt: time.Now().UTC(),
+		TranscriptTool: tool,
+		UserMessage:    t.user, UserTruncated: t.userCut, CapturedAt: time.Now().UTC(),
 		Context: append([]db.InterceptContextEntry{}, t.entries...), ContextTruncated: t.cut,
 	}}
 	t.append(db.InterceptContextEntry{Kind: "tool_use", Tool: tool, ToolUseID: id, Text: string(input)})
+}
+
+// WithExecutionCall binds the SDK's actual call ID before running its review.
+// Matching only name+arguments is ambiguous for concurrent identical calls.
+// Nested ExecuteExtraTool calls keep the outer transcript identity, so recovery
+// can still verify the exact recorded pair without guessing from tool arguments.
+func WithExecutionCall(ctx context.Context, id string) context.Context {
+	t, _ := ctx.Value(traceKey{}).(*Trace)
+	if t == nil || id == "" {
+		return ctx
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if c := t.calls[id]; c != nil {
+		c.claimed = true
+		return context.WithValue(ctx, callKey{}, c.audit)
+	}
+	return ctx
 }
 
 // WithCall claims the event before model review starts, so subsequent tools
@@ -135,7 +154,7 @@ func (t *Trace) bind(id string, f completion) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if c := t.calls[id]; c != nil {
-		c.complete = f
+		c.complete = append(c.complete, f)
 	}
 }
 
@@ -157,7 +176,9 @@ func (t *Trace) Complete(id, output string, isError bool) {
 		}
 	}
 	out, cut := bounded(output, outputLimit)
-	c.complete(status, out, cut)
+	for _, complete := range c.complete {
+		complete(status, out, cut)
+	}
 }
 
 // Finish marks missing results unknown, never successful. The tool may have
@@ -168,8 +189,8 @@ func (t *Trace) Finish() {
 	t.calls = make(map[string]*tracedCall)
 	t.mu.Unlock()
 	for _, c := range calls {
-		if c.complete != nil {
-			c.complete("unknown", "执行结束但未收到工具结果", false)
+		for _, complete := range c.complete {
+			complete("unknown", "执行结束但未收到工具结果", false)
 		}
 	}
 }

@@ -1356,6 +1356,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "tasks" && seg.length === 2 && m === "PATCH") {
     const task = mockTasks.find((item) => item.id === seg[1]);
     if (!task) throw new Error("任务不存在");
+    if (typeof b.description === "string" || typeof b.goal === "string") {
+      if (!task.paused && !["done", "failed", "timeout"].includes(task.status))
+        throw new Error("请先暂停任务，再修改描述和目的");
+      if (typeof b.description === "string") task.description = b.description.trim();
+      if (typeof b.goal === "string") task.goal = b.goal.trim();
+    }
     if (typeof b.name === "string") task.name = b.name.trim();
     if (typeof b.pinned === "boolean") {
       task.pinned = b.pinned;
@@ -2398,6 +2404,26 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (seg[0] === "visibility" && m === "GET") return { agents: [] };
 
   // ── intercept ──
+  if (path === "/intercept/actionable" && m === "GET") {
+    return {
+      items: mockInterceptHistory
+        .map((row) => ({ ...row, execution_status: mockInterceptDetails[row.id]?.execution_status }))
+        .filter(
+          (row) =>
+            (!q.get("task_id") || row.task_id === q.get("task_id")) &&
+            (row.status === "pending" || row.execution_status === "unknown"),
+        ),
+    };
+  }
+  if (seg[0] === "intercept" && seg[1] === "pending" && seg[3] === "resolve-execution") {
+    const detail = mockInterceptDetails[Number(seg[2])];
+    if (!detail || detail.execution_status !== "unknown") throw new Error("执行结果已处理或不存在");
+    if (!["succeeded", "failed", "not_executed"].includes(String(b.status)) || !String(b.note ?? "").trim())
+      throw new Error("请填写有效的核验结果和依据");
+    detail.execution_status = b.status as "succeeded" | "failed" | "not_executed";
+    detail.output = String(b.note);
+    return { ok: true };
+  }
   if (path === "/intercept/rules" && m === "GET") return { rules: D.interceptRules };
   if (seg[0] === "intercept" && seg[1] === "rules" && seg[3] === "toggle")
     return { ok: true, enabled: b.enabled ?? true };

@@ -12,6 +12,71 @@ import (
 	"testing"
 )
 
+func TestTaskContentEditingKeepsLifecycleAndExplorationConsistent(t *testing.T) {
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	token, err := signJWT(s.jwtKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"running", "paused", "done", "failed", "timeout"} {
+		t.Run(state, func(t *testing.T) {
+			task, err := m.CreateTask("original description", "original goal", nil, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, _ := strconv.ParseInt(task.ID, 10, 64)
+			defer m.pg.DeleteTask(id)
+			if state == "paused" {
+				err = m.SetTaskPaused(task.ID, true)
+			} else {
+				err = m.SetTaskStatus(task.ID, state)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			before := task.lifecycleSnapshot()
+			body := `{"name":"edited name","description":" 修改后的描述 ","goal":" 修改后的目的 "}`
+			req := httptest.NewRequest(http.MethodPatch, "/api/tasks/"+task.ID, strings.NewReader(body))
+			req.Header.Set("Authorization", "Bearer "+token)
+			rec := httptest.NewRecorder()
+			s.Handler().ServeHTTP(rec, req)
+			want := http.StatusOK
+			if state == "running" {
+				want = http.StatusConflict
+			}
+			if rec.Code != want {
+				t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+			}
+			saved, err := m.pg.GetTask(id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			description, goal, err := task.Store.Root()
+			if err != nil {
+				t.Fatal(err)
+			}
+			after := task.lifecycleSnapshot()
+			if after.Status != before.Status || after.Paused != before.Paused || after.CompletedAt != before.CompletedAt || after.Queued != before.Queued {
+				t.Fatalf("editing changed lifecycle: before=%+v after=%+v", before, after)
+			}
+			if state == "running" {
+				if saved.Description != "original description" || saved.Goal != "original goal" || saved.Name != "" {
+					t.Fatalf("running task changed: %+v", saved)
+				}
+			} else if saved.Goal != "修改后的目的" || saved.Description != "修改后的描述" || goal != saved.Goal || description != saved.Description || after.Goal != goal || after.Description != description {
+				t.Fatalf("content mismatch db=%+v memory=%+v root=%q/%q", saved, after, description, goal)
+			}
+		})
+	}
+}
+
 func TestTaskMetadataPatchReturnsRenameAndPin(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {

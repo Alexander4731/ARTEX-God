@@ -324,18 +324,17 @@ func (s *ExplorationStore) DeleteGoal(id int64) error {
 	return nil
 }
 
-// SetIntentState updates an intent node's state.
-// ResetRunningIntents returns any intent left in 'running' back to 'open' so it
-// is re-claimed. Called on startup: a 'running' intent with no live worker (a
-// backend restart or crashed worker goroutine left it stuck) would otherwise spin
-// forever in the UI. Workers resume from their transcript, so reopening is safe.
+// ResetRunningIntents recovers interrupted workers on startup. An unresolved
+// operation pauses its intent until verification; other workers can resume.
 func (s *ExplorationStore) ResetRunningIntents() (int64, error) {
-	res, err := s.db.Exec(`UPDATE exploration_nodes AS n SET
-state=CASE WHEN EXISTS(SELECT 1 FROM intercept_pending ip JOIN tasks t ON ip.task_id=t.id::text
+	res, err := s.db.Exec(`WITH interrupted AS (
+SELECT n.id, EXISTS(SELECT 1 FROM intercept_pending ip JOIN tasks t ON ip.task_id=t.id::text
  WHERE t.exploration_id=$1 AND (ip.audit->>'intent_id' IS NULL OR ip.audit->>'intent_id'=n.id::text)
- AND ip.audit->>'execution_status' IN ('unknown','awaiting_result')) THEN 'paused' ELSE 'open' END,
-completed_at=NULL, blocked_reason=NULL
-WHERE exploration_id=$1 AND kind='intent' AND state='running'`, s.expID)
+ AND ip.audit->>'execution_status' IN ('unknown','awaiting_result')) AS unresolved
+FROM exploration_nodes n WHERE n.exploration_id=$1 AND n.kind='intent' AND n.state='running')
+UPDATE exploration_nodes n SET state=CASE WHEN i.unresolved THEN 'paused' ELSE 'open' END,
+completed_at=NULL, blocked_reason=CASE WHEN i.unresolved THEN $2 ELSE NULL END
+FROM interrupted i WHERE n.id=i.id`, s.expID, IntentBlockedExecutionUnknown)
 	if err != nil {
 		return 0, err
 	}

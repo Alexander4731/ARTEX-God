@@ -1,11 +1,11 @@
 "use client";
 
 import * as React from "react";
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 
 import { ChevronRight, MailIcon, PlusCircleIcon } from "lucide-react";
-import { api } from "@/lib/api";
 
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -29,6 +29,7 @@ import {
   SidebarMenuSubItem,
   useSidebar,
 } from "@/components/ui/sidebar";
+import { api } from "@/lib/api";
 import { cn } from "@/lib/utils";
 import type {
   NavBadge,
@@ -161,7 +162,7 @@ function NavItem({ item, isItemActive, isSubItemActive, isSubmenuOpen }: NavItem
   );
 }
 
-// InterceptPendingBadge polls /api/intercept/pending every 5 s and shows a red
+// InterceptPendingBadge polls /api/intercept/actionable every 5 s and shows a red
 // count badge when there are unresolved approval requests.
 function InterceptPendingBadge() {
   const [count, setCount] = React.useState(0);
@@ -169,13 +170,18 @@ function InterceptPendingBadge() {
     let live = true;
     async function poll() {
       try {
-        const list = await api.interceptPending();
+        const list = await api.interceptActionable();
         if (live) setCount(list.length);
-      } catch { /* ignore */ }
+      } catch {
+        /* ignore */
+      }
     }
     void poll();
     const t = setInterval(poll, 5000);
-    return () => { live = false; clearInterval(t); };
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
   }, []);
   if (count === 0) return null;
   return (

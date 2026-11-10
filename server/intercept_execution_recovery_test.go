@@ -145,12 +145,35 @@ func TestResumeRecoversRecordedExecutionFailure(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = m.Close() })
 	task, id, stale := executionRecoveryFixture(t, m, "unknown", false)
+	if _, err := m.pg.Exec(`UPDATE exploration_nodes SET state='paused',blocked_reason=$2 WHERE id=$1`, stale.Audit.IntentID, db.IntentBlockedExecutionUnknown); err != nil {
+		t.Fatal(err)
+	}
+	manual, err := task.Store.AddIntent(map[string]any{"summary": "manual pause"}, 0, nil, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := task.Store.SetIntentState(manual, "paused"); err != nil {
+		t.Fatal(err)
+	}
+	// Before recovery even automatically paused intents must stay paused.
+	if err := m.pg.ReopenExecutionPausedIntents(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if node, err := task.Store.GetNode(stale.Audit.IntentID); err != nil || node.State != "paused" {
+		t.Fatalf("unverified intent reopened: %+v %v", node, err)
+	}
 	if err := m.ApplyTaskPause(task.ID); err != nil {
 		t.Fatal(err)
 	}
 	s := newAdmissionTestServer(m, func(*Task) bool { return false })
 	if _, err := s.admitPausedTask(task); err != nil {
 		t.Fatalf("recorded tool result blocked resume: %v", err)
+	}
+	if node, err := task.Store.GetNode(stale.Audit.IntentID); err != nil || node.State != "open" {
+		t.Fatalf("verified intent stranded: %+v %v", node, err)
+	}
+	if node, err := task.Store.GetNode(manual); err != nil || node.State != "paused" {
+		t.Fatalf("manual pause overwritten: %+v %v", node, err)
 	}
 	detail, err := m.pg.GetInterceptDetail(id)
 	if err != nil || detail.Audit.ExecutionStatus != "failed" || detail.Audit.Output != "Error: context canceled" {

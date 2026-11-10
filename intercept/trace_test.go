@@ -79,6 +79,24 @@ func TestTraceIdenticalParallelCallsAreNeverGuessed(t *testing.T) {
 	}
 }
 
+func TestTraceActualExecutionIDResolvesIdenticalCalls(t *testing.T) {
+	ctx, trace := WithTrace(t.Context(), "test", nil)
+	input := []byte(`{}`)
+	trace.Start("first", "Probe", input)
+	trace.Start("second", "Probe", input)
+	// A legacy pre-hook cannot disambiguate these calls.
+	a := auditFor(WithCall(ctx, "Probe", input), Decision{}, input, "pending")
+	if a.Correlation != "ambiguous" {
+		t.Fatal(a)
+	}
+	for _, id := range []string{"second", "first"} {
+		a := auditFor(WithCall(WithExecutionCall(ctx, id), "Probe", input), Decision{Action: "allow"}, input, "allowed")
+		if a.ToolUseID != id || a.Correlation != "exact" || a.ExecutionStatus != "awaiting_result" {
+			t.Fatalf("exact execution not bound: %+v", a)
+		}
+	}
+}
+
 func TestTraceSequentialIdenticalCallsAndRunIsolation(t *testing.T) {
 	ctx, trace := WithTrace(context.Background(), "test", nil)
 	input := []byte(`{}`)

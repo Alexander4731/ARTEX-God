@@ -19,8 +19,10 @@ import {
   Trash2Icon,
   XIcon,
 } from "lucide-react";
+import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { TaskEditButton } from "@/components/task-edit-button";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -438,7 +440,18 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2 text-base">
-            <TargetIcon className="size-4 text-primary" /> 任务描述与目标
+            <TargetIcon className="size-4 text-primary" /> 任务描述与目的
+            {task && (
+              <TaskEditButton
+                task={task}
+                onUpdated={() => {
+                  void api
+                    .task(taskId)
+                    .then(setTask)
+                    .catch((error) => toast.error(error.message));
+                }}
+              />
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent className="grid grid-cols-1 gap-4 sm:grid-cols-2">
@@ -447,7 +460,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
             <p className="text-sm whitespace-pre-wrap break-words">{task?.description?.trim() || "—"}</p>
           </div>
           <div className="flex flex-col gap-1.5">
-            <div className="text-xs font-medium text-muted-foreground">目标</div>
+            <div className="text-xs font-medium text-muted-foreground">目的</div>
             <p className="text-sm whitespace-pre-wrap break-words">{task?.goal?.trim() || "—"}</p>
           </div>
         </CardContent>

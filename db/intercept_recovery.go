@@ -7,6 +7,21 @@ import (
 	"time"
 )
 
+const IntentBlockedExecutionUnknown = "execution_unknown"
+
+// Only automatically paused intents are reopened, after every unresolved call
+// has been verified. Manual intent pauses remain untouched. The task itself is
+// still paused/queued until the caller completes ordinary admission.
+func (d *DB) ReopenExecutionPausedIntents(taskID string) error {
+	_, err := d.Exec(`UPDATE exploration_nodes n SET state='open', blocked_reason=NULL,
+completed_at=NULL, content_version=content_version+1
+FROM tasks t WHERE t.id::text=$1 AND n.exploration_id=t.exploration_id
+AND n.kind='intent' AND n.state='paused' AND n.blocked_reason=$2
+AND NOT EXISTS (SELECT 1 FROM intercept_pending ip WHERE ip.task_id=$1
+AND ip.audit->>'execution_status' IN ('unknown','awaiting_result'))`, taskID, IntentBlockedExecutionUnknown)
+	return err
+}
+
 // UnsettledExecution identifies an allowed call whose result needs recovery.
 type UnsettledExecution struct {
 	ID             int64

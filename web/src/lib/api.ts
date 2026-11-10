@@ -20,6 +20,7 @@ import type {
   BatchCategoryItem,
   BatchControlItem,
   ChatAttachment,
+  Collection,
   CommandRecord,
   Company,
   CompanyScopeMutation,
@@ -46,6 +47,7 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
+  FofaRow,
   IntentAsset,
   InterceptApprovalFilter,
   InterceptApprovalRow,
@@ -78,8 +80,6 @@ import type {
   SkillItem,
   SSProject,
   SSTask,
-  FofaRow,
-  Collection,
   Stats,
   Task,
   TaskArchive,
@@ -267,7 +267,8 @@ export const api = {
       intercept_rules: input.interceptRules ?? [], // 任务级资产拦截规则
     }),
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
-  updateTask: (id: string, input: { name?: string; pinned?: boolean }) => patch<Task>(`/tasks/${id}`, input),
+  updateTask: (id: string, input: { name?: string; pinned?: boolean; description?: string; goal?: string }) =>
+    patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
   createTaskCategory: (name: string) => post<TaskCategory>("/task-categories", { name }),
@@ -1224,6 +1225,10 @@ export const api = {
 
   // ---- intercept pending (ask) ----
   interceptPending: () => get<{ pending: InterceptPending[] }>("/intercept/pending").then((r) => arr(r.pending)),
+  interceptActionable: (taskId?: string) =>
+    get<{ items: InterceptApprovalRow[] }>(
+      `/intercept/actionable${taskId ? `?task_id=${encodeURIComponent(taskId)}` : ""}`,
+    ).then((r) => arr(r.items)),
   interceptGetOne: (id: number) => get<InterceptPending>(`/intercept/pending/${id}`),
   interceptDecide: (id: number, decision: "allowed" | "denied") =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/decide`, { decision }),

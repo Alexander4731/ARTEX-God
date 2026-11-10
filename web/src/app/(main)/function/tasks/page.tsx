@@ -47,6 +47,7 @@ import { toast } from "sonner";
 import { AssetInterceptRulesEditor } from "@/components/asset-intercept-rules-editor";
 import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
+import { TaskEditButton } from "@/components/task-edit-button";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
@@ -996,6 +997,7 @@ export default function TasksPage() {
                 <TableBody>
                   {paginated.map((task) => (
                     <TaskRow
+                      onUpdated={load}
                       key={task.id}
                       task={task}
                       // running 任务才吃 nowSec;其余行传 0 —— props 不变,memo 就能拦下每秒 tick
@@ -1179,6 +1181,7 @@ const TaskRow = React.memo(function TaskRow({
   onDelete,
   onControl,
   onRename,
+  onUpdated,
   onTogglePinned,
   onArchive,
   selected,
@@ -1189,6 +1192,7 @@ const TaskRow = React.memo(function TaskRow({
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
   onControl: (id: string, action: "pause" | "resume") => Promise<void>;
   onRename: (task: Task, name: string) => Promise<void>;
+  onUpdated: () => void;
   onTogglePinned: (task: Task) => Promise<void>;
   onArchive: (task: Task) => Promise<void>;
   selected: boolean;
@@ -1240,9 +1244,7 @@ const TaskRow = React.memo(function TaskRow({
           const f = task.findings;
           const total = f ? f.critical + f.high + f.medium + f.low : 0;
           if (!f || total === 0) return <span className="text-muted-foreground">0</span>;
-          const seg = (n: number, cls: string) => (
-            <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>
-          );
+          const seg = (n: number, cls: string) => <span className={n > 0 ? cls : "text-muted-foreground"}>{n}</span>;
           return (
             <span className="font-medium whitespace-nowrap" title="严重 / 高 / 中 / 低">
               {seg(f.critical, "text-rose-600 dark:text-rose-400")}
@@ -1304,6 +1306,7 @@ const TaskRow = React.memo(function TaskRow({
               <EyeIcon />
             </Link>
           </Button>
+          <TaskEditButton task={task} iconOnly onUpdated={onUpdated} />
           <TaskControlButton task={task} onControl={onControl} />
           <TaskPinAction task={task} onTogglePinned={onTogglePinned} />
           <TaskArchiveAction task={task} onArchive={onArchive} />
@@ -3425,8 +3428,8 @@ function CreateTaskSheet({
                 portalContainer={sheetContentRef}
               />
               <FieldDescription>
-                创建时固定所选合集的资产清单，并加入“测试资产”。后续导入或删除合集不会改变本任务的目标。
-                在「资产同步 → FOFA」里查询导入即可生成合集。
+                创建时固定所选合集的资产清单，并加入“测试资产”。后续导入或删除合集不会改变本任务的目标。 在「资产同步 →
+                FOFA」里查询导入即可生成合集。
               </FieldDescription>
             </Field>
             <Field>

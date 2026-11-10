@@ -8,11 +8,24 @@ import (
 	"iter"
 	"strings"
 
+	"github.com/Autumn-27/artex/guard"
+	"github.com/Autumn-27/norma/tool"
+
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/llm"
 )
 
 func newAgentSession(opts agentcore.Options) *agentcore.Session {
+	if opts.Tools == nil {
+		opts.Tools = tool.DefaultTools()
+	}
+	// NewSession appends these tools after supplied tools and may replace a tool
+	// with the same name. Keep their pre-hook active instead of deferring it to a
+	// wrapper the SDK would discard. Plan/memory/skill additions use SDK hooks.
+	if opts.Plan == nil && opts.Memory == nil && opts.Skills == nil {
+		opts.Hooks, opts.Tools = guard.WithExecutionReview(opts.Hooks, opts.Tools,
+			"WebFetch", "WebSearch", "TodoWrite", "AskUserQuestion", "TaskOutput", "TaskStop", "TaskList", "Monitor", "SearchExtraTools", "ExecuteExtraTool")
+	}
 	call := opts.Deps.CallModel
 	if call == nil && opts.Provider != nil {
 		call = opts.Provider.Stream

@@ -199,7 +199,7 @@ func (s *Server) toolListTasks() actool.CoreTool {
 				} else if end > t.CreatedAt {
 					dur = end - t.CreatedAt
 				}
-				row := map[string]any{"id": t.ID, "description": t.Description, "goal": t.Goal, "status": status, "run_seconds": dur}
+				row := map[string]any{"id": t.ID, "description": t.lifecycleSnapshot().Description, "goal": t.lifecycleSnapshot().Goal, "status": status, "run_seconds": dur}
 				if t.ParentRef != "" {
 					row["parent_ref"] = t.ParentRef
 				}

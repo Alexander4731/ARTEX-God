@@ -28,18 +28,19 @@ type InterceptRule struct {
 
 // InterceptPending is one row of intercept_pending.
 type InterceptPending struct {
-	ID             int64           `json:"id"`
-	RuleID         *int64          `json:"rule_id"`
-	ConversationID *int64          `json:"conversation_id"`
-	TaskID         *string         `json:"task_id"`
-	AgentName      string          `json:"agent_name"`
-	ToolName       string          `json:"tool_name"`
-	ToolInput      json.RawMessage `json:"tool_input"`
-	Status         string          `json:"status"`
-	DecisionSource string          `json:"decision_source"`
-	Reason         string          `json:"reason"` // 规则 message 或模型判定理由(前缀 [模型])
-	DecidedAt      *time.Time      `json:"decided_at"`
-	CreatedAt      time.Time       `json:"created_at"`
+	ID              int64           `json:"id"`
+	RuleID          *int64          `json:"rule_id"`
+	ConversationID  *int64          `json:"conversation_id"`
+	TaskID          *string         `json:"task_id"`
+	AgentName       string          `json:"agent_name"`
+	ToolName        string          `json:"tool_name"`
+	ToolInput       json.RawMessage `json:"tool_input"`
+	Status          string          `json:"status"`
+	ExecutionStatus string          `json:"execution_status,omitempty"`
+	DecisionSource  string          `json:"decision_source"`
+	Reason          string          `json:"reason"` // 规则 message 或模型判定理由(前缀 [模型])
+	DecidedAt       *time.Time      `json:"decided_at"`
+	CreatedAt       time.Time       `json:"created_at"`
 }
 
 const interceptRuleCols = `id, name, enabled, priority, match_target, match_type, pattern, action, message, timeout_enabled, timeout_seconds, timeout_action, created_at, updated_at`
@@ -171,11 +172,11 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), $9, $10) RETURNING id`,
 	return id, err
 }
 
-const interceptPendingCols = `id, rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, created_at, decision_source`
+const interceptPendingCols = `id, rule_id, conversation_id, task_id, agent_name, tool_name, tool_input, status, reason, decided_at, created_at, decision_source, COALESCE(audit->>'execution_status','')`
 
 func scanInterceptPending(s interface{ Scan(...any) error }, p *InterceptPending) error {
 	return s.Scan(&p.ID, &p.RuleID, &p.ConversationID, &p.TaskID, &p.AgentName,
-		&p.ToolName, &p.ToolInput, &p.Status, &p.Reason, &p.DecidedAt, &p.CreatedAt, &p.DecisionSource)
+		&p.ToolName, &p.ToolInput, &p.Status, &p.Reason, &p.DecidedAt, &p.CreatedAt, &p.DecisionSource, &p.ExecutionStatus)
 }
 
 // ListPendingIntercepts returns all unresolved approval requests, newest first.
@@ -221,7 +222,7 @@ func scanInterceptApprovalRow(rows interface{ Scan(...any) error }, r *Intercept
 	return rows.Scan(
 		&r.ID, &r.RuleID, &r.ConversationID, &r.TaskID, &r.AgentName,
 		&r.ToolName, &r.ToolInput, &r.Status, &r.Reason, &r.DecidedAt, &r.CreatedAt,
-		&r.DecisionSource, &r.ConvTitle, &r.ConvAgentKey, &r.RuleName,
+		&r.DecisionSource, &r.ConvTitle, &r.ConvAgentKey, &r.RuleName, &r.ExecutionStatus,
 	)
 }
 
@@ -234,7 +235,7 @@ const approvalRowColumns = `ip.id, ip.rule_id, ip.conversation_id, ip.task_id, i
        ip.tool_name, ip.tool_input, ip.status, ip.reason, ip.decided_at, ip.created_at, ` + approvalDecisionSource + `,
        COALESCE(c.title,'') AS conv_title,
        COALESCE(c.agent_key,'') AS conv_agent_key,
-       COALESCE(ir.name,'') AS rule_name`
+       COALESCE(ir.name,'') AS rule_name, COALESCE(ip.audit->>'execution_status','')`
 
 const approvalRowJoins = `
 FROM intercept_pending ip
@@ -243,6 +244,27 @@ LEFT JOIN intercept_rules ir ON ir.id = ip.rule_id`
 
 const approvalRowSelect = `SELECT ` + approvalRowColumns + approvalRowJoins
 const approvalRowSelectWithAudit = `SELECT ` + approvalRowColumns + `, ip.audit` + approvalRowJoins
+
+// ListActionableIntercepts is independent of history pagination and filters.
+// An approved operation can still block task resumption while its result is
+// unknown; it must remain visible until that separate problem is resolved.
+func (d *DB) ListActionableIntercepts(taskID string) ([]InterceptApprovalRow, error) {
+	rows, err := d.Query(approvalRowSelect+` WHERE ($1='' OR ip.task_id=$1)
+AND (ip.status='pending' OR ip.audit->>'execution_status'='unknown') ORDER BY ip.created_at,ip.id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []InterceptApprovalRow{}
+	for rows.Next() {
+		var row InterceptApprovalRow
+		if err := scanInterceptApprovalRow(rows, &row); err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
 
 func interceptSource(ruleID int64, reason string) string {
 	if ruleID != 0 {

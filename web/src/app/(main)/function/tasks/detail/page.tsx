@@ -9,6 +9,7 @@ import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, Paus
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
+import { TaskEditButton } from "@/components/task-edit-button";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -225,9 +226,9 @@ function TaskDetailInner() {
     let alive = true;
     const load = () =>
       api
-        .interceptTask(id)
+        .interceptActionable(id)
         .then((rows) => {
-          if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
+          if (alive) setInterceptPendingCount(rows.length);
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
@@ -366,6 +367,7 @@ function TaskDetailInner() {
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
+          <TaskEditButton task={task} onUpdated={load} />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {!terminal && !paused && task.execution_phase && task.execution_phase !== "idle" ? (

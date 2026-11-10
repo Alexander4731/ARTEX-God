@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/Autumn-27/artex/db"
@@ -84,6 +85,10 @@ EXECUTE FUNCTION approval_result_failure()`, taskID)); err != nil {
 				if err := json.Unmarshal([]byte(a.Detail), &detail); err != nil {
 					t.Error(err)
 					return
+				}
+				waiting, err := d.ListActionableIntercepts(taskID)
+				if err != nil || len(waiting) != 1 || waiting[0].ID != detail.ID || waiting[0].Status != "pending" {
+					t.Errorf("approval missing from actionable queue: %+v %v", waiting, err)
 				}
 				if err := ic.Decide(detail.ID, tc.approve); err != nil {
 					t.Error(err)
@@ -194,6 +199,134 @@ EXECUTE FUNCTION approval_result_failure()`, taskID)); err != nil {
 			}
 			if executions != wantCalls {
 				t.Fatalf("tool ran %d times, wanted %d", executions, wantCalls)
+			}
+			if waiting, err := d.ListActionableIntercepts(taskID); err != nil || len(waiting) != 0 {
+				t.Fatalf("settled approval remains actionable: %+v %v", waiting, err)
+			}
+		})
+	}
+}
+
+// Both SDK calls deliberately have identical input. Their results must bind to
+// the real execution IDs even if review timing and completion order differ.
+func TestCaptureIdenticalApprovalExecutions(t *testing.T) {
+	dsn, _, err := db.DSN()
+	if err != nil {
+		t.Skip("no test database configured")
+	}
+	d, err := db.Open(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	ic := intercept.New(d)
+	priorTools, err := ic.GetEnabledTools()
+	if err != nil {
+		t.Fatal(err)
+	}
+	priorConfig := ic.GetJudgeConfig()
+	t.Cleanup(func() { _ = ic.SetEnabledTools(priorTools); _ = ic.SetJudgeConfig(priorConfig) })
+	if err := ic.SetEnabledTools([]string{"ApprovalAuditProbe", "ExecuteExtraTool"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ic.SetJudgeConfig(intercept.JudgeConfig{Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	ic.SetReviewer(func(context.Context, int64, string, intercept.ReviewInput) (intercept.Decision, error) {
+		return intercept.Decision{Action: "allow", Message: "fixture only"}, nil
+	})
+	for _, deferred := range []bool{false, true} {
+		t.Run(fmt.Sprintf("deferred=%v", deferred), func(t *testing.T) {
+			taskID := fmt.Sprintf("duplicate-approval-%v", deferred)
+			t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM intercept_pending WHERE task_id=$1`, taskID) })
+			ctx := intercept.WithTaskContext(t.Context(), taskID, "probe", nil)
+			var mu sync.Mutex
+			calls := map[string]int{}
+			probe := tool.Build(tool.Spec{Name: "ApprovalAuditProbe", Schema: map[string]any{"type": "object"},
+				Concurrent: func(json.RawMessage) bool { return true },
+				Run: func(_ context.Context, _ json.RawMessage, tc *tool.ToolContext) (tool.Result, error) {
+					mu.Lock()
+					calls[tc.ToolUseID]++
+					mu.Unlock()
+					return tool.Text("result-" + tc.ToolUseID), nil
+				},
+			})
+			turn := 0
+			provider := captureUsageProvider{stream: func(_ context.Context, yield func(llm.StreamEvent, error) bool) {
+				turn++
+				if turn == 1 {
+					name, input := "ApprovalAuditProbe", `{}`
+					if deferred {
+						name, input = "ExecuteExtraTool", `{"tool_name":"ApprovalAuditProbe","arguments":{}}`
+					}
+					for _, id := range []string{"first", "second"} {
+						for _, event := range []llm.StreamEvent{{Type: llm.SEToolUseStart, ToolID: id, ToolName: name}, {Type: llm.SEToolInputJSON, Text: input}} {
+							if !yield(event, nil) {
+								return
+							}
+						}
+					}
+					yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "tool_use"}, nil)
+				} else {
+					yield(llm.StreamEvent{Type: llm.SETextDelta, Text: "done"}, nil)
+					yield(llm.StreamEvent{Type: llm.SEMessageDelta, StopReason: "end_turn"}, nil)
+				}
+			}}
+			store := transcript.NewStore(t.TempDir())
+			opts := agentcore.Options{Provider: provider, Tools: []tool.CoreTool{probe}, Hooks: guard.NewWithInterceptor(ic).Hooks(),
+				Transcript: store, SessionID: taskID, PermissionMode: permission.ModeBypass, WorkingDir: t.TempDir(), MaxTurns: 2}
+			if deferred {
+				opts.DeferredTools = []string{"ApprovalAuditProbe"}
+			}
+			if _, _, err := captureRun(ctx, opts, "run fixture twice", nil); err != nil {
+				t.Fatal(err)
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			if calls["first"] != 1 || calls["second"] != 1 {
+				t.Fatalf("execution count: %v", calls)
+			}
+			rows, err := d.ListTaskIntercepts(taskID)
+			want := 2
+			if deferred {
+				want = 4
+			}
+			if err != nil || len(rows) != want {
+				t.Fatalf("rows=%+v err=%v", rows, err)
+			}
+			for _, row := range rows {
+				detail, err := d.GetInterceptDetail(row.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				a := detail.Audit
+				// The SDK-generated gateway has no execution ID in its pre-hook.
+				// If simultaneous identical gateways are ambiguous, expose the
+				// unresolved approval instead of attaching another call's result.
+				if row.ToolName == "ExecuteExtraTool" && a.Correlation == "ambiguous" {
+					if a.ExecutionStatus != "unknown" {
+						t.Fatalf("ambiguous gateway reported execution: %+v", a)
+					}
+					continue
+				}
+				if a.Correlation != "exact" || a.ExecutionStatus != "succeeded" || a.Output != "result-"+a.ToolUseID {
+					t.Fatalf("wrong execution binding: %+v", a)
+				}
+			}
+			if _, err := d.Exec(`UPDATE intercept_pending SET audit=audit || '{"execution_status":"unknown"}'::jsonb WHERE task_id=$1`, taskID); err != nil {
+				t.Fatal(err)
+			}
+			if err := ic.RecoverExecutions(t.Context(), store, taskID); err != nil {
+				t.Fatal(err)
+			}
+			waiting, err := d.ListActionableIntercepts(taskID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, row := range waiting {
+				if !deferred || row.ToolName != "ExecuteExtraTool" || row.ExecutionStatus != "unknown" {
+					t.Fatalf("unexpected blocker: %+v", row)
+				}
 			}
 		})
 	}

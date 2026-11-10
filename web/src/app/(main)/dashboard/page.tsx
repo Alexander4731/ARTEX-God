@@ -191,7 +191,7 @@ export default function DashboardPage() {
           api.findings(),
           api.stats(),
           api.settings(),
-          api.interceptPending(),
+          api.interceptActionable(),
           api.activity(undefined, { limit: 30 }),
           api.tokenStats(),
           api.conversationTokens(),
@@ -1171,7 +1171,7 @@ export default function DashboardPage() {
           {/* pending approvals */}
           {pendingCount > 0 && (
             <div className="mt-3">
-              <div className="mb-1.5 text-[10px] font-medium text-amber-400">待审批 ({pendingCount})</div>
+              <div className="mb-1.5 text-[10px] font-medium text-amber-400">待处理审批 ({pendingCount})</div>
               <div className="flex flex-col gap-1.5">
                 {pending.slice(0, 3).map((p) => (
                   <Link
@@ -1181,7 +1181,9 @@ export default function DashboardPage() {
                   >
                     <div className="min-w-0">
                       <div className="text-[10px] font-medium">{p.tool_name}</div>
-                      <div className="text-[9px] text-muted-foreground">{p.agent_name}</div>
+                      <div className="text-[9px] text-muted-foreground">
+                        {p.agent_name} · {p.execution_status === "unknown" ? "执行结果待核验" : "待审批"}
+                      </div>
                     </div>
                     <ArrowUpRightIcon className="size-3 shrink-0 text-amber-400" />
                   </Link>
@@ -1201,7 +1203,7 @@ export default function DashboardPage() {
           {pendingCount === 0 && (
             <div className="mt-3 rounded-lg border bg-muted/10 px-3 py-3 text-center text-[10px] text-muted-foreground">
               <ShieldCheckIcon className="mx-auto mb-1 size-4 text-emerald-500/50" />
-              无待审批拦截
+              无待处理审批
             </div>
           )}
         </Card>

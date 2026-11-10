@@ -202,6 +202,12 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 		s.engine.Pause(t.ID, agent.Causef("queued_for_admission", "任务等待运行准入",
 			"任务正在等待并发队列或准入状态提交，本次执行已停止；只有获得运行槽后才会重新领取意图"))
 	}
+	if err := s.m.pg.ReopenExecutionPausedIntents(t.ID); err != nil {
+		if !engineWasPaused && !wasPaused && !wasQueued {
+			s.engine.Resume(t)
+		}
+		return false, err
+	}
 
 	status := lifecycle.Status
 	if wasTerminal {
@@ -416,7 +422,8 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	}
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	goalRuntime := s.agentsForTask(t).runtime
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	content := t.lifecycleSnapshot()
+	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, content.Goal, content.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {
 			specs = append(specs, goalSpec{Text: g.Text, VulnClass: g.VulnClass})
@@ -426,7 +433,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 		// No decomposed goals (LLM error / no provider): use the raw task goal verbatim
 		// as a single goal so the task still has something to judge against. This is the
 		// only path that writes here — decomposed goals are already persisted by the tool.
-		if g := strings.TrimSpace(t.Goal); g != "" {
+		if g := strings.TrimSpace(content.Goal); g != "" {
 			log.Printf("[goals] task %s: LLM 目标拆解无产出，回退为「原始目标作为单目标」", t.ID)
 			if _, err := t.Store.CompleteBootstrap([]map[string]any{{"text": g}}); err != nil {
 				log.Printf("[bootstrap] task %s 目标保存失败: %v", t.ID, err)

@@ -898,7 +898,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			nextRound = 5 * time.Second
 			return
 		}
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.lifecycleSnapshot().Goal, triggers, emit)
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
@@ -1146,6 +1146,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 		if unknown {
 			state = "paused"
+			blockedReason = db.IntentBlockedExecutionUnknown
 			e.pauseForInput(t, "工具执行结果尚未确认，请在审批记录中核验后再恢复任务")
 		}
 		break

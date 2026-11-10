@@ -1309,6 +1309,7 @@ export interface AssetInterceptRule {
 }
 
 export interface InterceptPending {
+  execution_status?: string;
   decision_source?: "rule" | "model" | "unknown" | "";
   id: number;
   rule_id?: number;
