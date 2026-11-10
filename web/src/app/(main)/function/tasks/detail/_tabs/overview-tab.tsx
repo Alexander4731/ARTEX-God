@@ -56,6 +56,7 @@ function cacheHitRate(cacheRead: number, input: number): string {
 
 // 测试范围一条的显示值：域名 / 网段 / 公司。
 function scopeValue(row: TaskScopeRow): string {
+  if (row.kind === "collection") return `${row.collection_name || "已删除合集"}（创建时快照）`;
   if (row.value) return row.value;
   if (row.domain) return row.domain;
   if (row.net) return row.net;
@@ -65,6 +66,7 @@ function scopeValue(row: TaskScopeRow): string {
 
 const SCOPE_KIND_LABELS: Record<TaskScopeRow["kind"], string> = {
   company: "公司",
+  collection: "资产合集",
   root_domain: "根域名",
   subdomain: "子域名",
   ip: "IP",

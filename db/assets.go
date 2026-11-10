@@ -1213,7 +1213,8 @@ func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
 // transaction in DeleteTaskCascadePrepared; this method remains for callers
 // that explicitly manage only asset associations.
 func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]`, taskID)
+	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]
+AND NOT EXISTS (SELECT 1 FROM asset_collection_members member WHERE member.asset_id=assets.id)`, taskID)
 	if err != nil {
 		return 0, err
 	}
@@ -1295,7 +1296,7 @@ WITH current_assets AS (
 other_assets AS (
   SELECT DISTINCT a.id
   FROM assets a
-  WHERE EXISTS (
+  WHERE EXISTS (SELECT 1 FROM asset_collection_members member WHERE member.asset_id=a.id) OR EXISTS (
     SELECT 1 FROM tasks t
     WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
   ) OR EXISTS (

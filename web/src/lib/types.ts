@@ -355,9 +355,11 @@ export interface WorkspaceFile {
 export interface TaskScopeRow {
   id: number;
   task_id: number;
-  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword";
+  kind: "company" | "root_domain" | "subdomain" | "ip" | "cidr" | "icp" | "keyword" | "collection";
   company_id?: number;
   company_name?: string; // 后端 JOIN companies 解析，仅 kind=company 有值
+  collection_id?: number;
+  collection_name?: string;
   domain?: string;
   net?: string;
   value?: string;
@@ -1388,6 +1390,16 @@ export interface FofaRow {
   domain: string;
   title: string;
   server: string;
+}
+
+// Collection — 资产合集：FOFA 等收集的显式资产集合（以查询语法命名），可作任务目标。
+export interface Collection {
+  id: number;
+  name: string;
+  query: string;
+  source: string;
+  member_count: number;
+  created_at: string;
 }
 
 // ConvTokenSummary — one conversation's token total (+ profile/date) for merging

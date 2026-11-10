@@ -106,6 +106,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	if len(snapshot.ExclusiveAssetIDs) > 0 {
 		if _, err := tx.Exec(`DELETE FROM assets asset
 WHERE asset.id=ANY($2::bigint[]) AND asset.company_id IS NULL
+AND NOT EXISTS (SELECT 1 FROM asset_collection_members member WHERE member.asset_id=asset.id)
 AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
@@ -563,7 +564,7 @@ func remapArchiveAssetReferences(tables map[string]json.RawMessage, mapping map[
 		}
 		out[table], _ = json.Marshal(rows)
 	}
-	for _, table := range []string{"exploration_nodes", "findings"} {
+	for _, table := range []string{"exploration_nodes", "findings", "task_scope"} {
 		rows, err := decodeArchiveRows(tables[table])
 		if err != nil {
 			return nil, err
@@ -625,6 +626,29 @@ func restoreTaskScopes(tx *sql.Tx, raw json.RawMessage) ([]string, error) {
 		if companyID, ok := jsonInt64(row["company_id"]); ok && companyID > 0 && !rowExists(tx, "companies", companyID) {
 			warnings = append(warnings, fmt.Sprintf("企业 %d 已删除，关联范围已跳过", companyID))
 			continue
+		}
+		if row["kind"] == "collection" {
+			if row["collection_name"] == nil {
+				row["collection_name"] = ""
+			}
+			if cid, ok := jsonInt64(row["collection_id"]); ok && cid > 0 {
+				// Preserve distinct snapshot identities even if several groups were deleted.
+				if value, _ := row["value"].(string); value == "" {
+					row["value"] = strconv.FormatInt(cid, 10)
+				}
+				var exists bool
+				if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM asset_collections WHERE id=$1)`, cid).Scan(&exists); err != nil {
+					return nil, err
+				}
+				if !exists {
+					row["collection_id"] = nil
+					warnings = append(warnings, fmt.Sprintf("合集 %d 已删除，已保留任务目标快照", cid))
+				}
+			}
+		}
+		// Archives written before collection support have no such column.
+		if row["collection_name"] == nil {
+			row["collection_name"] = ""
 		}
 		kept = append(kept, row)
 	}

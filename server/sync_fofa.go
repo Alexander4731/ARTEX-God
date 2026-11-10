@@ -274,23 +274,23 @@ func (s *Server) syncFofaQuery(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---------- POST /api/sync/fofa/sync ---------- (检索 + 导入资产)
+// ---------- POST /api/sync/fofa/sync ---------- (检索 + 导入资产 + 归入合集)
 func (s *Server) syncFofaRun(w http.ResponseWriter, r *http.Request) {
 	if s.pg(w) == nil {
 		return
 	}
 	as := s.assetStore()
-	cs := s.companyStore()
-	if as == nil || cs == nil {
+	if as == nil {
 		writeErr(w, 503, "database unavailable")
 		return
 	}
 	var req struct {
-		Query         string `json:"query"`
-		Size          int    `json:"size"`
-		CreateCompany bool   `json:"create_company"`
-		CompanyName   string `json:"company_name"`
-		PageSize      int    `json:"page_size"`
+		Query          string `json:"query"`
+		Size           int    `json:"size"`
+		CollectionName string `json:"collection_name"`
+		CreateCompany  bool   `json:"create_company"`
+		CompanyName    string `json:"company_name"`
+		PageSize       int    `json:"page_size"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, "invalid JSON: "+err.Error())
@@ -306,9 +306,14 @@ func (s *Server) syncFofaRun(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "未配置 FOFA key，请先在上方保存账号")
 		return
 	}
+	// 合集名默认用查询语法本身。
 	if req.CreateCompany && strings.TrimSpace(req.CompanyName) == "" {
-		writeErr(w, 400, "勾选了「创建企业」时必须填写企业名称")
+		writeErr(w, 400, "创建企业时必须填写企业名称")
 		return
+	}
+	name := strings.TrimSpace(req.CollectionName)
+	if name == "" {
+		name = query
 	}
 	target := req.Size
 	if target <= 0 || target > fofaMaxResults {
@@ -322,22 +327,9 @@ func (s *Server) syncFofaRun(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
 
-	// 先建公司（拿到 id）；scope 规则在导入后按实际发现的根域写入，再重算归属。
-	var cid int64
-	var companies []string
-	if req.CreateCompany {
-		name := strings.TrimSpace(req.CompanyName)
-		id, err := cs.UpsertByName(name)
-		if err != nil {
-			writeErr(w, 500, "创建企业失败: "+err.Error())
-			return
-		}
-		cid = id
-		companies = append(companies, name)
-	}
-
 	synced := map[string]int{"service": 0, "ip": 0, "subdomain": 0, "domain": 0}
 	var warnings, errs []string
+	memberSet := map[int64]struct{}{}
 	rootSet := map[string]struct{}{}
 	imported := 0
 	fofaTotal := 0
@@ -360,12 +352,17 @@ func (s *Server) syncFofaRun(w http.ResponseWriter, r *http.Request) {
 				truncated = true
 				break
 			}
-			root, e := fofaIngest(as, row, synced)
+			ids, e := fofaIngest(as, row, synced)
+			if len(row) > 4 {
+				if root, _ := db.RootDomain(strings.TrimSpace(row[4])); root != "" {
+					rootSet[root] = struct{}{}
+				}
+			}
 			if e != "" {
 				errs = append(errs, e)
 			}
-			if root != "" {
-				rootSet[root] = struct{}{}
+			for _, id := range ids {
+				memberSet[id] = struct{}{}
 			}
 			imported++
 		}
@@ -378,31 +375,53 @@ func (s *Server) syncFofaRun(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// 把发现的根域写进公司 scope，再重算归属，让刚导入的资产挂到公司。
-	if cid != 0 && len(rootSet) > 0 {
-		roots := make([]string, 0, len(rootSet))
-		for r := range rootSet {
-			roots = append(roots, r)
+	// 把本次收集到的资产归入以查询命名的合集（显式成员；不碰企业归属）。
+	memberIDs := make([]int64, 0, len(memberSet))
+	for id := range memberSet {
+		memberIDs = append(memberIDs, id)
+	}
+	var collection map[string]any
+	if len(memberIDs) > 0 {
+		if c, err := s.m.pg.ImportCollection(name, query, memberIDs); err != nil {
+			errs = append(errs, "保存合集失败: "+err.Error())
+		} else {
+			collection = map[string]any{"id": c.ID, "name": c.Name, "members": c.MemberCount}
 		}
-		cs.AddScope(cid, roots, "fofa:"+strings.TrimSpace(req.CompanyName))
-		_ = cs.RecomputeAttribution()
+	}
+	var companies []string
+	if req.CreateCompany && len(memberIDs) > 0 {
+		cs := s.m.pg.Companies()
+		companyName := strings.TrimSpace(req.CompanyName)
+		if cid, err := cs.UpsertByName(companyName); err != nil {
+			errs = append(errs, "创建企业失败: "+err.Error())
+		} else {
+			companies = append(companies, companyName)
+			roots := make([]string, 0, len(rootSet))
+			for root := range rootSet {
+				roots = append(roots, root)
+			}
+			_, _, _, scopeErrors := cs.AddScope(cid, roots, "fofa:"+companyName)
+			errs = append(errs, scopeErrors...)
+		}
 	}
 
 	writeJSON(w, 200, map[string]any{
-		"synced":    synced,
-		"total":     fofaTotal,
-		"imported":  imported,
-		"truncated": truncated,
-		"companies": companies,
-		"warnings":  warnings,
-		"errors":    errs,
+		"synced":     synced,
+		"total":      fofaTotal,
+		"imported":   imported,
+		"truncated":  truncated,
+		"collection": collection,
+		"companies":  companies,
+		"warnings":   warnings,
+		"errors":     errs,
 	})
 }
 
-// fofaIngest maps one FOFA result row (ordered by fofaFields) into asset-graph upserts.
-// Returns the discovered root domain (for company scope) and a non-empty error string on
-// a notable failure (collected, non-fatal). Company attribution happens via scope.
-func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root string, errStr string) {
+// fofaIngest maps one FOFA result row (ordered by fofaFields) into asset-graph
+// upserts, returning the IDs of every asset it created/updated (for collection
+// membership) plus a non-empty error string on a notable failure (collected,
+// non-fatal).
+func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (assetIDs []int64, errStr string) {
 	at := func(i int) string {
 		if i < len(row) {
 			return strings.TrimSpace(row[i])
@@ -420,6 +439,11 @@ func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root st
 	if portStr == "" {
 		portStr = hostPort
 	}
+	add := func(id int64) {
+		if id > 0 {
+			assetIDs = append(assetIDs, id)
+		}
+	}
 
 	// IP 资产。
 	if net.ParseIP(ip) != nil {
@@ -431,8 +455,9 @@ func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root st
 		if bound != "" {
 			boundList = []string{bound}
 		}
-		if _, err := as.UpsertIP(db.UpsertIPReq{IP: ip, BoundDomains: boundList}); err == nil {
+		if id, err := as.UpsertIP(db.UpsertIPReq{IP: ip, BoundDomains: boundList}); err == nil {
 			synced["ip"]++
+			add(id)
 		} else {
 			errStr = "IP " + ip + " 入库失败: " + err.Error()
 		}
@@ -440,17 +465,14 @@ func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root st
 
 	// 域名：根域 + （host 不同于根域时）子域。
 	if domain != "" {
-		if _, err := as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: domain}); err == nil {
+		if id, err := as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: domain}); err == nil {
 			synced["domain"]++
-		}
-		if r, _ := db.RootDomain(domain); r != "" {
-			root = r
-		} else {
-			root = domain
+			add(id)
 		}
 		if hostname != "" && hostname != domain && net.ParseIP(hostname) == nil {
-			if _, err := as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: hostname}); err == nil {
+			if id, err := as.UpsertSubdomain(db.UpsertSubdomainReq{Domain: hostname}); err == nil {
 				synced["subdomain"]++
+				add(id)
 			}
 		}
 	}
@@ -460,8 +482,9 @@ func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root st
 	if isHTTP {
 		u := buildFofaURL(scheme, protocol, hostname, hostPort)
 		if u != "" {
-			if _, err := as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: u, PageTitle: title, IP: ip}); err == nil {
+			if id, err := as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: u, PageTitle: title, IP: ip}); err == nil {
 				synced["service"]++
+				add(id)
 			} else {
 				errStr = "HTTP 服务 " + u + " 入库失败: " + err.Error()
 			}
@@ -472,12 +495,13 @@ func fofaIngest(as *db.AssetStore, row []string, synced map[string]int) (root st
 			if d == "" && net.ParseIP(hostname) == nil {
 				d = hostname
 			}
-			if _, err := as.UpsertOtherService(db.UpsertOtherServiceReq{Domain: d, IP: ip, Port: port, ServiceName: protocol}); err == nil {
+			if id, err := as.UpsertOtherService(db.UpsertOtherServiceReq{Domain: d, IP: ip, Port: port, ServiceName: protocol}); err == nil {
 				synced["service"]++
+				add(id)
 			}
 		}
 	}
-	return root, errStr
+	return assetIDs, errStr
 }
 
 // splitFofaHost parses a FOFA host field into (scheme, hostname, port). Accepts forms like

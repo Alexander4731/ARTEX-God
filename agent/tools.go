@@ -566,6 +566,10 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 				for _, row := range scope {
 					entry := map[string]any{"kind": row.Kind, "source": row.Source}
 					switch {
+					case row.Kind == "collection":
+						entry["collection_id"] = row.CollectionID
+						entry["collection_name"] = row.CollectionName
+						entry["snapshot"] = true
 					case row.Domain != "":
 						entry["value"] = row.Domain
 					case row.Net != "":

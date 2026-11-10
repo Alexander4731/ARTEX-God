@@ -682,6 +682,7 @@ func archiveAssetMetadata(tx *sql.Tx, taskID, expID int64, assetRows json.RawMes
 	rowsID, err := tx.Query(`WITH candidate AS (`+archiveAssetIDsQuery()+`)
 SELECT asset.id FROM assets asset JOIN candidate ON candidate.id=asset.id
 WHERE asset.company_id IS NULL
+AND NOT EXISTS (SELECT 1 FROM asset_collection_members member WHERE member.asset_id=asset.id)
 AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id

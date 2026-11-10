@@ -96,9 +96,17 @@ const MaxTaskCompanyCount = 32
 
 const taskCompanyAssetSource = "company"
 
+// MaxTaskCollectionCount bounds asset collections attachable as task targets.
+const MaxTaskCollectionCount = 32
+
+const taskCollectionAssetSource = "collection"
+
 var (
 	ErrTaskCompanyIDsInvalid = errors.New("invalid task company ids")
 	ErrTaskCompanyNotFound   = errors.New("task company not found")
+
+	ErrTaskCollectionIDsInvalid = errors.New("invalid task collection ids")
+	ErrTaskCollectionNotFound   = errors.New("task collection not found")
 )
 
 // NormalizeTaskCompanyIDs validates IDs and removes duplicates while retaining
@@ -120,6 +128,30 @@ func NormalizeTaskCompanyIDs(ids []int64) ([]int64, error) {
 		normalized = append(normalized, id)
 		if len(normalized) > MaxTaskCompanyCount {
 			return nil, fmt.Errorf("%w: got more than %d unique companies", ErrTaskCompanyIDsInvalid, MaxTaskCompanyCount)
+		}
+	}
+	return normalized, nil
+}
+
+// NormalizeTaskCollectionIDs validates collection IDs and removes duplicates
+// while retaining the user's first-seen order.
+func NormalizeTaskCollectionIDs(ids []int64) ([]int64, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	seen := make(map[int64]struct{}, min(len(ids), MaxTaskCollectionCount))
+	normalized := make([]int64, 0, min(len(ids), MaxTaskCollectionCount))
+	for _, id := range ids {
+		if id <= 0 {
+			return nil, fmt.Errorf("%w: collection id must be positive", ErrTaskCollectionIDsInvalid)
+		}
+		if _, exists := seen[id]; exists {
+			continue
+		}
+		seen[id] = struct{}{}
+		normalized = append(normalized, id)
+		if len(normalized) > MaxTaskCollectionCount {
+			return nil, fmt.Errorf("%w: got more than %d unique collections", ErrTaskCollectionIDsInvalid, MaxTaskCollectionCount)
 		}
 	}
 	return normalized, nil
@@ -149,6 +181,7 @@ type TaskCreateOptions struct {
 	CategoryID           *int64
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
+	CollectionIDs        []int64
 	LLMProfileIDs        []int64
 	TimeoutSeconds       int
 	PlanHeartbeatSeconds int
@@ -170,6 +203,11 @@ func (d *DB) CreateTaskWithOptions(description, goal string, opts TaskCreateOpti
 		return nil, err
 	}
 	opts.CompanyIDs = companyIDs
+	collectionIDs, err := NormalizeTaskCollectionIDs(opts.CollectionIDs)
+	if err != nil {
+		return nil, err
+	}
+	opts.CollectionIDs = collectionIDs
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -236,6 +274,9 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 		return nil, err
 	}
 	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
+		return nil, err
+	}
+	if err := insertTaskCollections(tx, t.ID, opts.CollectionIDs); err != nil {
 		return nil, err
 	}
 	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
@@ -305,6 +346,59 @@ ON CONFLICT (task_id, asset_id) DO UPDATE
 SET source=EXCLUDED.source,
     source_summary=EXCLUDED.source_summary,
     source_node_id=NULL`, taskID, companyIDs, taskCompanyAssetSource); err != nil {
+		return err
+	}
+	return nil
+}
+
+// insertTaskCollections writes task_scope rows (kind='collection') for the given
+// collections and snapshots their member assets into the task, mirroring
+// insertTaskCompanies but keyed on the explicit asset_collection_members list.
+func insertTaskCollections(tx *sql.Tx, taskID int64, collectionIDs []int64) error {
+	if len(collectionIDs) == 0 {
+		return nil
+	}
+	var inserted int
+	if err := tx.QueryRow(`
+WITH requested(collection_id, position) AS (
+    SELECT collection_id, position
+    FROM unnest($2::bigint[]) WITH ORDINALITY AS requested(collection_id, position)
+), inserted AS (
+    INSERT INTO task_scope(task_id, kind, collection_id, collection_name, value, asset_ids, source, reason)
+    SELECT $1, 'collection', c.id, c.name, c.id::text,
+        ARRAY(SELECT asset_id FROM asset_collection_members WHERE collection_id=c.id ORDER BY asset_id),
+        'manual', '任务创建时关联资产合集（固定快照）'
+    FROM requested
+    JOIN asset_collections c ON c.id=requested.collection_id
+    ORDER BY requested.position
+    RETURNING collection_id
+)
+SELECT count(*) FROM inserted`, taskID, collectionIDs).Scan(&inserted); err != nil {
+		return err
+	}
+	if inserted != len(collectionIDs) {
+		return fmt.Errorf("%w: one or more collections do not exist", ErrTaskCollectionNotFound)
+	}
+	// Snapshot members into assets.task_ids so 测试资产 shows them (fires sync_task_asset_links).
+	if _, err := tx.Exec(`
+UPDATE assets
+SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids, $1) END
+WHERE id IN (SELECT unnest(asset_ids) FROM task_scope WHERE task_id=$1 AND kind='collection')`, taskID); err != nil {
+		return err
+	}
+	// Provenance. DISTINCT ON (asset.id) so an asset shared by several collections
+	// yields one row (ON CONFLICT must not affect the same row twice).
+	if _, err := tx.Exec(`
+INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
+SELECT DISTINCT ON (asset.id) $1, asset.id, $2, '任务创建时关联资产合集：' || ts.collection_name
+FROM task_scope ts
+JOIN assets asset ON asset.id=ANY(ts.asset_ids)
+WHERE ts.task_id=$1 AND ts.kind='collection' AND $1=ANY(asset.task_ids)
+ORDER BY asset.id, ts.id
+ON CONFLICT (task_id, asset_id) DO UPDATE
+SET source=EXCLUDED.source,
+    source_summary=EXCLUDED.source_summary,
+    source_node_id=NULL`, taskID, taskCollectionAssetSource); err != nil {
 		return err
 	}
 	return nil
@@ -633,7 +727,8 @@ deletable AS (
   SELECT a.id
   FROM assets a
   JOIN candidate_assets c ON c.id=a.id
-  WHERE NOT EXISTS (
+  WHERE NOT EXISTS (SELECT 1 FROM asset_collection_members member WHERE member.asset_id=a.id)
+  AND NOT EXISTS (
     SELECT 1 FROM tasks t
     WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
   ) AND NOT EXISTS (
