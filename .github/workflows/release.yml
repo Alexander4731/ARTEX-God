@@ -1,7 +1,11 @@
 name: release
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "[0-9]*"]
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: write # 创建 Release 需要
@@ -26,7 +30,7 @@ jobs:
           name: web-dist
           path: web/out
 
-  # ② 五平台交叉编译（内嵌前端）+ 打 zip
+  # ② Linux / macOS 交叉编译；Windows 使用下面的便携包构建。
   binaries:
     needs: frontend
     runs-on: ubuntu-latest
@@ -37,12 +41,11 @@ jobs:
           - { goos: linux, goarch: arm64 }
           - { goos: darwin, goarch: amd64 }
           - { goos: darwin, goarch: arm64 }
-          - { goos: windows, goarch: amd64 }
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: go.mod
           cache: true
       - uses: actions/download-artifact@v4
         with:
@@ -77,11 +80,58 @@ jobs:
           name: bin-linux-${{ matrix.goarch }}
           path: dist/artex-linux-${{ matrix.goarch }}/artex
 
-  # ③ 汇总所有 zip → 创建 GitHub Release
+  # Windows 的第三方运行库复用已验证的固定版本；应用、启动器和前端
+  # 始终从当前 tag 编译。SHA-256 固定在仓库中，不接受被替换的基础包。
+  windows:
+    needs: frontend
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: web-dist
+          path: server/webui/dist
+      - name: Build Windows portable package
+        shell: pwsh
+        env:
+          ARTEX_BUILD_VERSION: ${{ github.ref_name }}
+        run: |
+          ./packaging/windows/release.ps1 -Version $env:ARTEX_BUILD_VERSION -WorkDirectory "$env:RUNNER_TEMP/portable-build" -OutputDirectory "$env:GITHUB_WORKSPACE/dist"
+      - name: Smoke test the packaged release in a clean Unicode path
+        shell: pwsh
+        env:
+          ARTEX_BUILD_VERSION: ${{ github.ref_name }}
+        run: |
+          $name = "artex-$($env:ARTEX_BUILD_VERSION.TrimStart('v'))-windows-amd64"
+          $destination = Join-Path $env:RUNNER_TEMP 'ARTEX 全新环境'
+          Expand-Archive -LiteralPath "dist/$name.zip" -DestinationPath $destination
+          ./packaging/windows/smoke.ps1 -PackageDirectory (Join-Path $destination $name) -OutputDirectory "$env:RUNNER_TEMP/portable-smoke"
+          $result = Get-Content -LiteralPath "$env:RUNNER_TEMP/portable-smoke/result.json" -Raw | ConvertFrom-Json
+          if ($result.health.version -ne $env:ARTEX_BUILD_VERSION.TrimStart('v')) { throw 'The package contains the wrong application version.' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-portable-smoke
+          path: ${{ runner.temp }}/portable-smoke
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pkg-windows-amd64
+          path: dist/*.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  # ③ 全部构建与 Windows 启动测试成功后创建 Release。
   release:
-    needs: binaries
+    needs: [binaries, windows]
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           pattern: pkg-*
@@ -92,6 +142,8 @@ jobs:
         run: sha256sum *.zip > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
+          body_path: RELEASE_NOTES.md
+          fail_on_unmatched_files: true
           files: |
             dist/*.zip
             dist/SHA256SUMS
@@ -100,6 +152,8 @@ jobs:
   # ④ 多架构镜像 → 推 Docker Hub（复用 binaries 编好的 Linux 二进制，
   #    镜像里只装工具 + 放二进制；arm64 仅需模拟 apt 层，构建快很多）
   docker:
+    # Fork 默认只发布 GitHub Release；镜像仓库须显式配置后启用。
+    if: vars.PUBLISH_DOCKER == 'true' && vars.DOCKER_IMAGE != ''
     needs: binaries
     runs-on: ubuntu-latest
     steps:
@@ -121,7 +175,7 @@ jobs:
       - uses: docker/metadata-action@v5
         id: meta
         with:
-          images: autumn27/artex
+          images: ${{ vars.DOCKER_IMAGE }}
           tags: |
             type=ref,event=tag
             type=raw,value=latest
