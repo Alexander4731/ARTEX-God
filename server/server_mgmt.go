@@ -1800,8 +1800,9 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	// would get wrong — legacy/partial clients that never send it stay streaming.
 	var body struct {
 		db.LLMProfile
-		APIKey    string `json:"api_key"`
-		Streaming *bool  `json:"streaming"`
+		APIKey       string `json:"api_key"`
+		Streaming    *bool  `json:"streaming"`
+		ClientCompat *bool  `json:"client_compat"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1810,6 +1811,18 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	p := body.LLMProfile
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
+	if body.ClientCompat != nil {
+		p.ClientCompat = *body.ClientCompat
+	} else if p.ID != 0 {
+		previous, err := pg.ProfileByID(p.ID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if previous != nil {
+			p.ClientCompat = previous.ClientCompat
+		}
+	}
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,
 	// 故非 openai 格式一律清空。未知取值同样清空,避免把 DB CHECK 的报错甩给用户。
@@ -1979,11 +1992,12 @@ func (s *Server) pgLLMPoolReset(w http.ResponseWriter, r *http.Request) {
 // the OpenAI path, it falls back to the OpenAI endpoint at the stripped root.
 func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Provider  string `json:"provider"` // "openai" | "anthropic"
-		BaseURL   string `json:"base_url"`
-		APIKey    string `json:"api_key"`
-		Proxy     string `json:"proxy"`
-		ProfileID *int64 `json:"profile_id"` // fallback: use stored key from this profile
+		Provider     string `json:"provider"` // "openai" | "anthropic"
+		BaseURL      string `json:"base_url"`
+		APIKey       string `json:"api_key"`
+		Proxy        string `json:"proxy"`
+		ProfileID    *int64 `json:"profile_id"` // fallback: use stored key from this profile
+		ClientCompat *bool  `json:"client_compat"`
 	}
 	if err := decode(r, &req); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1991,9 +2005,15 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 	// Resolve API key: form input > profile stored key.
 	apiKey := strings.TrimSpace(req.APIKey)
-	if apiKey == "" && req.ProfileID != nil {
+	clientCompat := req.ClientCompat != nil && *req.ClientCompat
+	if req.ProfileID != nil && (apiKey == "" || req.ClientCompat == nil) {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
-			apiKey = p.APIKey
+			if apiKey == "" {
+				apiKey = p.APIKey
+			}
+			if req.ClientCompat == nil {
+				clientCompat = p.ClientCompat
+			}
 		}
 	}
 	if apiKey == "" {
@@ -2069,6 +2089,10 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		httpReq.Header = c.hdr
+		if clientCompat {
+			format := agent.ConfigFrom(provider, "", "", "", "").Format
+			agent.ApplyClientCompat(httpReq, format)
+		}
 		resp, err := client.Do(httpReq)
 		if err != nil {
 			lastErr = "请求失败: " + err.Error()

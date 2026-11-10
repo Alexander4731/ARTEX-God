@@ -327,6 +327,7 @@ function ProfileSheet({
   const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
+  const [clientCompat, setClientCompat] = React.useState(false);
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // 本配置的重试覆盖;全 0=跟随全局
   const [testing, setTesting] = React.useState(false);
@@ -355,6 +356,7 @@ function ProfileSheet({
     setMaxTokens(String(profile?.max_tokens ?? 0));
     setMaxTokensField(fromStore(profile?.max_tokens_field));
     setSessionHeaderKey(profile?.session_header_key ?? "");
+    setClientCompat(profile?.client_compat ?? false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
@@ -369,7 +371,7 @@ function ProfileSheet({
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId);
+      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId, clientCompat);
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -401,6 +403,7 @@ function ProfileSheet({
         profileId,
         streaming,
         sessionHeaderKey.trim(),
+        clientCompat,
       );
       // 回复内容一并展示：看得见模型确实说了话，才算和会话里跑通是一回事。
       if (r.ok)
@@ -444,6 +447,7 @@ function ProfileSheet({
         // 后端也会再做一次同样的归一化，这里只是别让 UI 送出自相矛盾的值。
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
+        client_compat: clientCompat,
         retry,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
@@ -576,6 +580,18 @@ function ProfileSheet({
               仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如
               socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
             </p>
+          </div>
+
+          <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="p-client-compat">模拟官方客户端</Label>
+              <p className="text-muted-foreground text-xs">
+                {format === "anthropic"
+                  ? "使用 Claude Code 的客户端标识和会话请求头，兼容要求专用客户端的渠道。"
+                  : "使用 Codex 的客户端标识和会话请求头，兼容要求专用客户端的渠道。Codex 渠道建议选择 Responses API 格式。"}
+              </p>
+            </div>
+            <Switch id="p-client-compat" checked={clientCompat} onCheckedChange={setClientCompat} />
           </div>
 
           <div className="grid gap-2">

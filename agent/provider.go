@@ -74,6 +74,8 @@ type Config struct {
 	// 空 = 不发送。值由 transcript.WithSessionID 挂在请求 context 上,由 RoundTripper
 	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
 	SessionHeaderKey string
+	// ClientCompat adds protocol-specific Codex or Claude Code identification headers.
+	ClientCompat bool
 	// Retry 是该配置解析后的重试参数(profile 覆盖 → 全局策略 → 内置默认,由
 	// server 侧解析)。三层的含义见 RetryConfig;零值 = 完全沿用内置默认。
 	Retry RetryConfig
@@ -331,6 +333,8 @@ type quotaAwareTransport struct {
 	// carries; its value is the session id read from the request context. Empty
 	// disables it. See Config.SessionHeaderKey.
 	sessionHeaderKey string
+	clientCompat     bool
+	format           llm.Format
 }
 
 func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -339,6 +343,12 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	}
 	if err := t.pacer.wait(req.Context()); err != nil {
 		return nil, err
+	}
+	if t.clientCompat || t.sessionHeaderKey != "" {
+		req = req.Clone(req.Context())
+	}
+	if t.clientCompat {
+		ApplyClientCompat(req, t.format)
 	}
 	// Custom session-id header: name is user-configured, value is THIS run's
 	// session id (norma stashes it on the context via transcript.WithSessionID).
@@ -429,6 +439,7 @@ func quotaAwareHTTPClient(c Config) (*http.Client, error) {
 	}
 	return &http.Client{Transport: quotaAwareTransport{
 		base: transport, sessionHeaderKey: strings.TrimSpace(c.SessionHeaderKey),
+		clientCompat: c.ClientCompat, format: c.Format,
 		pacer: newRequestPacer(c.RatePerSecond, c.RatePerMinute),
 	}}, nil
 }
