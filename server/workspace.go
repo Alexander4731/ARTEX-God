@@ -53,11 +53,13 @@ func (s *Server) wsRoot(w http.ResponseWriter) *os.Root {
 }
 
 type wsEntry struct {
-	Name  string `json:"name"`
-	Path  string `json:"path"`
-	Dir   bool   `json:"dir"`
-	Size  int64  `json:"size"`
-	MTime int64  `json:"mtime"` // unix millis
+	CanDelete bool   `json:"can_delete"`
+	ReadOnly  bool   `json:"readonly"`
+	Name      string `json:"name"`
+	Path      string `json:"path"`
+	Dir       bool   `json:"dir"`
+	Size      int64  `json:"size"`
+	MTime     int64  `json:"mtime"` // unix millis
 }
 
 // GET /api/workspace/list?path=<rel>
@@ -93,17 +95,22 @@ func (s *Server) wsList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]wsEntry, 0, len(ents))
+	parentReadOnly := workspaceReadOnly(root, abs)
+	managed := workspaceManagedFiles(root)
 	for _, e := range ents {
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
+		readOnly := parentReadOnly || workspaceManagedPath(filepath.Join(abs, e.Name())) || info.Mode()&(os.ModeSymlink|os.ModeIrregular) != 0 || workspaceSameManaged(info, managed)
 		out = append(out, wsEntry{
-			Name:  e.Name(),
-			Path:  s.wsRel(filepath.Join(abs, e.Name())),
-			Dir:   e.IsDir(),
-			Size:  info.Size(),
-			MTime: info.ModTime().UnixMilli(),
+			ReadOnly:  readOnly,
+			CanDelete: !workspaceDeletionProtected(filepath.Join(abs, e.Name())) && !readOnly,
+			Name:      e.Name(),
+			Path:      s.wsRel(filepath.Join(abs, e.Name())),
+			Dir:       e.IsDir(),
+			Size:      info.Size(),
+			MTime:     info.ModTime().UnixMilli(),
 		})
 	}
 	// 目录在前，各自按名称排序。
@@ -113,7 +120,7 @@ func (s *Server) wsList(w http.ResponseWriter, r *http.Request) {
 		}
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
-	writeJSON(w, 200, map[string]any{"path": s.wsRel(abs), "entries": out})
+	writeJSON(w, 200, map[string]any{"path": s.wsRel(abs), "entries": out, "readonly": parentReadOnly})
 }
 
 // GET /api/workspace/read?path=<rel> — inline text for view/edit. Binary or oversize
@@ -161,7 +168,7 @@ func (s *Server) wsRead(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, map[string]any{"path": s.wsRel(abs), "size": fi.Size(), "binary": true})
 		return
 	}
-	writeJSON(w, 200, map[string]any{"path": s.wsRel(abs), "size": fi.Size(), "binary": false, "content": string(data)})
+	writeJSON(w, 200, map[string]any{"path": s.wsRel(abs), "size": fi.Size(), "binary": false, "content": string(data), "readonly": workspaceReadOnly(root, abs)})
 }
 
 // POST /api/workspace/write  {path, content} — create/overwrite a text file.
@@ -184,16 +191,14 @@ func (s *Server) wsWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "非法路径")
 		return
 	}
-	if fi, err := root.Stat(abs); err == nil && fi.IsDir() {
-		writeErr(w, 400, "目标是目录")
+	parent, base, err := workspaceParent(root, abs, true)
+	if err != nil {
+		workspaceMutationError(w, err)
 		return
 	}
-	if err := root.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
-	if err := root.WriteFile(abs, []byte(req.Content), 0o644); err != nil {
-		writeErr(w, 500, err.Error())
+	defer parent.Close()
+	if err := workspaceAtomicWrite(parent, base, strings.NewReader(req.Content)); err != nil {
+		workspaceMutationError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "path": s.wsRel(abs)})
@@ -218,9 +223,17 @@ func (s *Server) wsMkdir(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "非法路径")
 		return
 	}
-	if err := root.MkdirAll(abs, 0o755); err != nil {
-		writeErr(w, 500, err.Error())
+	parent, base, err := workspaceParent(root, abs, true)
+	if err != nil {
+		workspaceMutationError(w, err)
 		return
+	}
+	defer parent.Close()
+	if info, err := parent.Lstat(base); err != nil || !info.IsDir() {
+		if err := parent.Mkdir(base, 0755); err != nil {
+			workspaceMutationError(w, err)
+			return
+		}
 	}
 	writeJSON(w, 200, map[string]any{"ok": true, "path": s.wsRel(abs)})
 }
@@ -242,12 +255,22 @@ func (s *Server) wsDelete(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "不能删除工作区根目录")
 		return
 	}
-	if _, err := root.Stat(abs); err != nil {
+	if workspaceDeletionProtected(abs) {
+		workspaceMutationError(w, errWorkspaceManaged)
+		return
+	}
+	parent, base, err := workspaceParent(root, abs, false)
+	if err != nil {
+		workspaceMutationError(w, err)
+		return
+	}
+	defer parent.Close()
+	if _, err := parent.Lstat(base); err != nil {
 		writeErr(w, 404, "路径不存在")
 		return
 	}
-	if err := root.RemoveAll(abs); err != nil {
-		writeErr(w, 500, err.Error())
+	if err := parent.RemoveAll(base); err != nil {
+		workspaceMutationError(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{"ok": true})
@@ -320,7 +343,7 @@ func (s *Server) wsUpload(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		if err := saveUpload(root, hdr, destAbs); err != nil {
-			writeErr(w, 500, err.Error())
+			workspaceMutationError(w, err)
 			return
 		}
 		saved++
@@ -334,13 +357,12 @@ func saveUpload(root *os.Root, hdr *multipart.FileHeader, dest string) error {
 		return err
 	}
 	defer src.Close()
-	out, err := root.Create(dest)
+	parent, base, err := workspaceParent(root, dest, false)
 	if err != nil {
 		return err
 	}
-	defer out.Close()
-	_, err = io.Copy(out, src)
-	return err
+	defer parent.Close()
+	return workspaceAtomicWrite(parent, base, src)
 }
 
 // sanitizeFilename strips characters unsafe for a Content-Disposition filename token.

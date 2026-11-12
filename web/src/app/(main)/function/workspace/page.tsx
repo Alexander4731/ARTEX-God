@@ -70,6 +70,9 @@ type EditState = {
 export default function WorkspacePage() {
   const [path, setPath] = React.useState("");
   const [entries, setEntries] = React.useState<WorkspaceEntry[]>([]);
+  const [readOnly, setReadOnly] = React.useState(false);
+  const loadEpoch = React.useRef(0);
+  const fileEpoch = React.useRef(0);
   const [loading, setLoading] = React.useState(true);
   const [edit, setEdit] = React.useState<EditState | null>(null);
   const [mkdirOpen, setMkdirOpen] = React.useState(false);
@@ -78,21 +81,25 @@ export default function WorkspacePage() {
 
   const load = React.useCallback(
     (p: string) => {
+      const epoch = ++loadEpoch.current;
       setLoading(true);
       api
         .workspaceList(p)
         .then((r) => {
+          if (epoch !== loadEpoch.current) return;
+          setReadOnly(r.readonly ?? false);
           setEntries(r.entries);
           setPath(r.path);
         })
-        .catch((e) => toast.error(`读取目录失败：${(e as Error).message}`))
-        .finally(() => setLoading(false));
+        .catch((e) => { if (epoch === loadEpoch.current) toast.error(`读取目录失败：${(e as Error).message}`); })
+        .finally(() => { if (epoch === loadEpoch.current) setLoading(false); });
     },
     [],
   );
 
   React.useEffect(() => {
     load("");
+    return () => { loadEpoch.current++; fileEpoch.current++; };
   }, [load]);
 
   const crumbs = React.useMemo(() => {
@@ -107,25 +114,26 @@ export default function WorkspacePage() {
   }, [path]);
 
   const openFile = (e: WorkspaceEntry) => {
+    const epoch = ++fileEpoch.current;
     api
       .workspaceRead(e.path)
-      .then((f) => setEdit({ file: f, content: f.content ?? "", dirty: false, saving: false }))
+      .then((f) => { if (epoch === fileEpoch.current) setEdit({ file: f, content: f.content ?? "", dirty: false, saving: false }); })
       .catch((err) => toast.error(`打开文件失败：${(err as Error).message}`));
   };
 
   const saveFile = () => {
-    if (!edit) return;
+    if (!edit || edit.file.readonly) return;
     setEdit({ ...edit, saving: true });
     api
       .workspaceWrite(edit.file.path, edit.content)
       .then(() => {
         toast.success("已保存");
-        setEdit((cur) => (cur ? { ...cur, dirty: false, saving: false } : cur));
+        setEdit((cur) => (cur?.file.path === edit.file.path ? { ...cur, dirty: false, saving: false } : cur));
         load(path);
       })
       .catch((err) => {
         toast.error(`保存失败：${(err as Error).message}`);
-        setEdit((cur) => (cur ? { ...cur, saving: false } : cur));
+        setEdit((cur) => (cur?.file.path === edit.file.path ? { ...cur, saving: false } : cur));
       });
   };
 
@@ -192,10 +200,10 @@ export default function WorkspacePage() {
           ))}
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setMkdirOpen(true)}>
+          <Button variant="outline" size="sm" disabled={loading || readOnly} onClick={() => setMkdirOpen(true)}>
             <FolderPlusIcon /> 新建文件夹
           </Button>
-          <Button variant="outline" size="sm" onClick={() => uploadRef.current?.click()}>
+          <Button variant="outline" size="sm" disabled={loading || readOnly} onClick={() => uploadRef.current?.click()}>
             <UploadIcon /> 上传
           </Button>
           <Button variant="ghost" size="icon" className="size-8" onClick={() => load(path)} title="刷新">
@@ -268,7 +276,7 @@ export default function WorkspacePage() {
                         size="icon"
                         className="text-destructive size-7"
                         title="删除"
-                        onClick={() => del(e)}
+                        disabled={e.readonly || e.can_delete === false} onClick={() => del(e)}
                       >
                         <Trash2Icon className="size-3.5" />
                       </Button>
@@ -309,6 +317,7 @@ export default function WorkspacePage() {
                 <>
                   <div className="min-h-0 flex-1 p-3">
                     <Textarea
+                      readOnly={edit.file.readonly}
                       value={edit.content}
                       onChange={(ev) => setEdit({ ...edit, content: ev.target.value, dirty: true })}
                       spellCheck={false}
@@ -324,7 +333,7 @@ export default function WorkspacePage() {
                       >
                         <DownloadIcon /> 下载
                       </Button>
-                      <Button onClick={saveFile} disabled={!edit.dirty || edit.saving}>
+                      <Button onClick={saveFile} disabled={edit.file.readonly || !edit.dirty || edit.saving}>
                         <SaveIcon /> {edit.saving ? "保存中…" : "保存"}
                       </Button>
                     </div>
@@ -336,6 +345,7 @@ export default function WorkspacePage() {
         </SheetContent>
       </Sheet>
 
+      {readOnly && <p className="text-sm text-muted-foreground">系统数据目录仅供查看，请通过对应的数据管理入口修改。</p>}
       {/* 新建文件夹 */}
       <Dialog open={mkdirOpen} onOpenChange={setMkdirOpen}>
         <DialogContent className="sm:max-w-sm">

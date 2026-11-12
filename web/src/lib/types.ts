@@ -333,6 +333,8 @@ export interface CoverageAssetRefs {
 
 // ---- Workspace file manager (workDir) ----
 export interface WorkspaceEntry {
+  can_delete?: boolean;
+  readonly?: boolean;
   name: string;
   path: string; // workspace-relative, forward slashes
   dir: boolean;
@@ -340,10 +342,12 @@ export interface WorkspaceEntry {
   mtime: number; // unix millis
 }
 export interface WorkspaceListing {
+  readonly?: boolean;
   path: string;
   entries: WorkspaceEntry[];
 }
 export interface WorkspaceFile {
+  readonly?: boolean;
   path: string;
   size: number;
   binary: boolean;
