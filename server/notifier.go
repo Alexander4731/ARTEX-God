@@ -262,7 +262,11 @@ func (n *Notifier) send(ctx context.Context, channel notify.Channel, cfg map[str
 	// 单次投递设上限，避免某个渠道卡住把这一轮剩余渠道全部拖住。
 	sendCtx, cancel := context.WithTimeout(ctx, notifySendTimeout)
 	defer cancel()
-	delivered, err := channel.Send(sendCtx, cfg, msg)
+	route, err := n.pg.NotificationHTTPRoute(sendCtx)
+	delivered := 0
+	if err == nil {
+		delivered, err = channel.Send(notify.WithHTTPRoute(sendCtx, route), cfg, msg)
+	}
 	if err == nil && delivered > 0 {
 		if delivered > len(deliveries) {
 			// 渠道回报的条数不可能超过投递数；真发生了说明渲染层算错了，

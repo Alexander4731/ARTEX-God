@@ -873,7 +873,7 @@ func (s *Server) pgSaveMCP(w http.ResponseWriter, r *http.Request) {
 	isNew := m.ID == 0
 	id, err := pg.SaveMCP(&m)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeConfigError(w, err)
 		return
 	}
 	// On initial add, auto-discover + cache the tool list so the UI shows it right
@@ -1809,6 +1809,12 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p := body.LLMProfile
+	format, err := db.NormalizeLLMFormat(p.Format)
+	if err != nil {
+		writeConfigError(w, err)
+		return
+	}
+	p.Format = format
 	p.APIKey = body.APIKey
 	p.Streaming = body.Streaming == nil || *body.Streaming
 	if body.ClientCompat != nil {
@@ -1834,7 +1840,7 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := pg.SaveProfile(&p)
 	if err != nil {
-		writeErr(w, 500, err.Error())
+		writeConfigError(w, err)
 		return
 	}
 	// Editing a profile rebuilds any task pinned to it on its next round. Reapply

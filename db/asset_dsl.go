@@ -367,6 +367,9 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		case "=":
 			return col + " ILIKE " + b.next("%"+e.Value+"%"), nil
 		case "==":
+			if e.Value == "" {
+				return "(" + col + " IS NULL OR " + col + " = " + b.next(e.Value) + ")", nil
+			}
 			return col + " = " + b.next(e.Value), nil
 		case "!=":
 			return col + " NOT ILIKE " + b.next("%"+e.Value+"%"), nil

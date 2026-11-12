@@ -159,6 +159,11 @@ ORDER BY is_default DESC, priority DESC, id ASC`)
 
 // SaveProfile inserts (id==0) or updates a profile. Empty apiKey on update keeps existing.
 func (d *DB) SaveProfile(p *LLMProfile) (int64, error) {
+	format, validationErr := NormalizeLLMFormat(p.Format)
+	if validationErr != nil {
+		return 0, validationErr
+	}
+	p.Format = format
 	hint := p.APIKeyHint
 	if len(p.APIKey) >= 4 {
 		hint = "…" + p.APIKey[len(p.APIKey)-4:]
@@ -910,6 +915,11 @@ ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.descriptio
 }
 
 func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
+	transport, validationErr := NormalizeMCPTransport(m.Transport)
+	if validationErr != nil {
+		return 0, validationErr
+	}
+	m.Transport = transport
 	args, env := string(m.Args), string(m.Env)
 	if args == "" {
 		args = "[]"

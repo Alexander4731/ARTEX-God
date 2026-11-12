@@ -81,41 +81,59 @@ func blockInternalDial(_, address string, _ syscall.RawConn) error {
 	return nil
 }
 
-// notifyTransport 在默认 Transport 的基础上只加一个拨号守卫。
-// 用 Clone 保留默认的全部调优（连接池、HTTP/2、超时、proxy 等），
-// 避免为了加一个检查而改动其它行为。
-var notifyTransport = func() *http.Transport {
-	t, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return &http.Transport{}
-	}
-	clone := t.Clone()
-	clone.DialContext = (&net.Dialer{Timeout: 10 * time.Second, Control: blockInternalDial}).DialContext
-	return clone
-}()
+// WithHTTPRoute selects an immutable client for one delivery. SMTP is unaffected.
+type httpRouteKey struct{}
 
-// httpClient 是所有渠道投递共用的客户端。
-//
-// 刻意**不**复用项目的全局出口代理（server 侧的 GlobalProxy）：那个代理是给渗透
-// 目标流量用的，常是不稳定的隧道，而通知的可用性不该被目标网络的抖动绑架。
-// IM 推送直连即可。超时设为 15 秒——比这更慢的对端实际上已经是故障状态。
-//
-// 拒绝跨主机重定向：本功能的投递地址都是「一个固定 endpoint」形态，正常不会
-// 重定向到别的主机；而这几家的凭据（钉钉的 access_token、企微的 key、Telegram 的
-// bot token）**就在 URL 里**，跟随跨主机跳转等于把凭据交给重定向目标。同主机
-// 的跳转（如末尾补斜杠）仍允许。
-var httpClient = &http.Client{
-	Timeout:   15 * time.Second,
-	Transport: notifyTransport,
-	CheckRedirect: func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 5 {
-			return errors.New("重定向次数过多")
-		}
-		if len(via) > 0 && req.URL.Host != via[0].URL.Host {
-			return fmt.Errorf("拒绝跨主机重定向（%s → %s）", via[0].URL.Host, req.URL.Host)
-		}
-		return nil
-	},
+func WithHTTPRoute(ctx context.Context, route string) context.Context {
+	return context.WithValue(ctx, httpRouteKey{}, route)
+}
+
+func newNotifyTransport(base http.RoundTripper, environment bool) *http.Transport {
+	t := &http.Transport{ForceAttemptHTTP2: true, MaxIdleConns: 100,
+		IdleConnTimeout: 90 * time.Second, TLSHandshakeTimeout: 10 * time.Second,
+		ExpectContinueTimeout: time.Second}
+	if original, ok := base.(*http.Transport); ok {
+		t = original.Clone()
+	}
+	t.Proxy = nil
+	if environment {
+		t.Proxy = http.ProxyFromEnvironment
+	}
+	t.DialContext = (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second, Control: blockInternalDial}).DialContext
+	// A custom TLS dialer would bypass DialContext and its address guard.
+	t.DialTLSContext = nil
+	t.DialTLS = nil
+	return t
+}
+
+func newNotifyClient(environment bool) *http.Client {
+	return &http.Client{Timeout: 15 * time.Second,
+		Transport: newNotifyTransport(http.DefaultTransport, environment),
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 5 {
+				return errors.New("重定向次数过多")
+			}
+			if len(via) > 0 && (req.URL.Host != via[0].URL.Host || req.URL.Scheme != via[0].URL.Scheme) {
+				return errors.New("拒绝跨主机或跨协议重定向")
+			}
+			return nil
+		},
+	}
+}
+
+var directHTTPClient = newNotifyClient(false)
+var environmentHTTPClient = newNotifyClient(true)
+
+func notificationClient(ctx context.Context) (*http.Client, error) {
+	route, _ := ctx.Value(httpRouteKey{}).(string)
+	switch route {
+	case "", "direct":
+		return directHTTPClient, nil
+	case "legacy_environment":
+		return environmentHTTPClient, nil
+	default:
+		return nil, Permanent(errors.New("未知通知 HTTP 路由"))
+	}
 }
 
 // respBodyLimit 限制读取响应体的大小。对端异常时可能吐回超大内容，而我们只需要
@@ -151,7 +169,11 @@ func doJSON(ctx context.Context, method, url string, headers map[string]string, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := httpClient.Do(req)
+	client, err := notificationClient(ctx)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := client.Do(req)
 	if err != nil {
 		// 连接被拒、DNS 失败、超时——多为瞬时故障，交给退避重试。
 		//

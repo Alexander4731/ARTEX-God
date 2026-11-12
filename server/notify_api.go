@@ -127,12 +127,18 @@ func (s *Server) notifyMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	baseURL, _, _ := pg.GetSetting(settingNotifyPublicBaseURL)
 	digest, _, _ := pg.GetSetting(settingNotifyDigestMinutes)
+	route, err := pg.NotificationHTTPRoute(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	stats, err := pg.NotificationStatsSnapshot(r.Context())
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{
+		"http_route":          route,
 		"kinds":               kinds,
 		"enabled":             pg.GetBool(settingNotifyEnabled, true),
 		"public_base_url":     baseURL,
@@ -428,7 +434,12 @@ func (s *Server) notifyTestChannel(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	// 测试消息只有一条，送达条数这里不需要（渠道长度上限对单条消息而言
 	// 由截断兜底，不涉及分段）。
-	if _, err := channel.Send(r.Context(), cfg, msg); err != nil {
+	route, err := pg.NotificationHTTPRoute(r.Context())
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if _, err := channel.Send(notify.WithHTTPRoute(r.Context(), route), cfg, msg); err != nil {
 		// 把渠道返回的原始错误如实回给用户——这是他们调试配置的唯一线索。
 		writeErr(w, 502, err.Error())
 		return

@@ -48,6 +48,7 @@ export default function NotifyPage() {
   const [testing, setTesting] = React.useState(false);
 
   const [globalSaving, setGlobalSaving] = React.useState(false);
+  const [httpRoute, setHTTPRoute] = React.useState("direct");
   const [baseURL, setBaseURL] = React.useState("");
   const [digestMin, setDigestMin] = React.useState("");
 
@@ -56,6 +57,7 @@ export default function NotifyPage() {
       .notifyMeta()
       .then((m) => {
         setMeta(m);
+        setHTTPRoute(m.http_route);
         setBaseURL(m.public_base_url);
         setDigestMin(m.digest_interval_min);
       })
@@ -246,7 +248,7 @@ export default function NotifyPage() {
   async function saveGlobal() {
     setGlobalSaving(true);
     try {
-      const patch: Record<string, unknown> = { notify_public_base_url: baseURL.trim() };
+      const patch: Record<string, unknown> = { notify_public_base_url: baseURL.trim(), notify_http_route: httpRoute };
       const n = Number(digestMin);
       if (Number.isFinite(n) && n > 0) patch.notify_digest_interval_min = n;
       await api.setSettings(patch);
@@ -330,6 +332,17 @@ export default function NotifyPage() {
               onChange={(e) => setDigestMin(e.target.value)}
             />
             <p className="text-muted-foreground text-xs">仅对「汇总」模式的渠道生效。</p>
+          </div>
+          <div className="grid gap-2">
+            <Label htmlFor="n-route">通知 HTTP 路由</Label>
+            <Select value={httpRoute} onValueChange={setHTTPRoute}>
+              <SelectTrigger id="n-route"><SelectValue /></SelectTrigger>
+              <SelectContent>
+                <SelectItem value="direct">直连</SelectItem>
+                <SelectItem value="legacy_environment">环境代理（兼容旧配置）</SelectItem>
+              </SelectContent>
+            </Select>
+            <p className="text-muted-foreground text-xs">仅影响 HTTP 通知；SMTP 使用原连接设置。</p>
           </div>
           <div className="sm:col-span-2">
             <Button onClick={saveGlobal} disabled={globalSaving}>

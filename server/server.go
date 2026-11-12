@@ -3343,6 +3343,7 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 func (s *Server) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
+	route, _, _ := s.m.pg.GetSetting("notify_http_route")
 	concOn, concLimit := s.m.ConcurrencyLimit()
 	if concLimit == 0 {
 		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
@@ -3373,6 +3374,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"noa_compaction": s.m.NoaCompactionEnabled(),
 		// 漏洞 IM 推送的全局项。渠道本身是独立资源，走 /api/notify/* 管理；
 		// 这里只放「作用于全部渠道」的三项。
+		"notify_http_route":          route,
 		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
 		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
 		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
@@ -3445,6 +3447,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		NoaCompaction *bool `json:"noa_compaction"`
 		// 漏洞 IM 推送的全局项。三者都由投递引擎每轮读一次，改完即时生效，
 		// 不需要重建 agent 或重启。
+		NotifyHTTPRoute  *string `json:"notify_http_route"`
 		NotifyEnabled    *bool   `json:"notify_enabled"`
 		NotifyBaseURL    *string `json:"notify_public_base_url"`
 		NotifyDigestMins *int    `json:"notify_digest_interval_min"`
@@ -3452,6 +3455,17 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	if req.NotifyHTTPRoute != nil {
+		route := strings.TrimSpace(*req.NotifyHTTPRoute)
+		if route != "direct" && route != "legacy_environment" {
+			writeJSON(w, 400, map[string]any{"error": "未知通知 HTTP 路由", "code": "invalid_enum", "field": "notify_http_route"})
+			return
+		}
+		if err := s.m.pg.SetSetting("notify_http_route", route); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
 	}
 	if req.ConstraintsInjectPlanner != nil {
 		if err := s.m.pg.SetBool(settingConstraintsInjectPlanner, *req.ConstraintsInjectPlanner); err != nil {
