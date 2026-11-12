@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -253,35 +255,54 @@ func extractBinary(zipPath, dst string) error {
 	}
 	defer zr.Close()
 
+	var selected *zip.File
 	for _, entry := range zr.File {
-		if entry.FileInfo().IsDir() || !strings.EqualFold(path.Base(entry.Name), want) {
+		if !strings.EqualFold(path.Base(strings.ReplaceAll(entry.Name, "\\", "/")), want) {
 			continue
 		}
-		rc, err := entry.Open()
-		if err != nil {
-			return fmt.Errorf("读取 %s: %w", entry.Name, err)
+		// Validate the original member spelling and mode before opening any output.
+		if selected != nil {
+			return fmt.Errorf("发布包含多个 %s", want)
 		}
-		defer rc.Close()
-
-		f, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o755)
-		if err != nil {
-			return fmt.Errorf("写出新二进制: %w", err)
+		if !entry.Mode().IsRegular() || !fs.ValidPath(entry.Name) || strings.ContainsAny(entry.Name, "\\:\x00") {
+			return fmt.Errorf("发布包内可执行文件路径或类型无效")
 		}
-		defer f.Close()
-
-		n, err := io.Copy(f, io.LimitReader(rc, maxBinarySize+1))
-		if err != nil {
-			return fmt.Errorf("解压 %s: %w", entry.Name, err)
+		if entry.UncompressedSize64 == 0 || entry.UncompressedSize64 > maxBinarySize {
+			return fmt.Errorf("发布包内可执行文件大小无效")
 		}
-		if n > maxBinarySize {
-			return fmt.Errorf("发布包内的可执行文件超过 %s，拒绝解压", humanSize(maxBinarySize))
-		}
-		if n == 0 {
-			return fmt.Errorf("发布包内的 %s 是空文件", want)
-		}
-		return f.Sync()
+		selected = entry
 	}
-	return fmt.Errorf("发布包里没有找到 %s", want)
+	if selected == nil {
+		return fmt.Errorf("发布包里没有找到 %s", want)
+	}
+	rc, err := selected.Open()
+	if err != nil {
+		return fmt.Errorf("读取二进制: %w", err)
+	}
+	defer rc.Close()
+	f, err := os.CreateTemp(filepath.Dir(dst), ".artex-extract-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(f.Name())
+	defer f.Close()
+	n, err := io.Copy(f, io.LimitReader(rc, maxBinarySize+1))
+	if err != nil {
+		return fmt.Errorf("解压二进制: %w", err)
+	}
+	if n <= 0 || n > maxBinarySize {
+		return fmt.Errorf("解压后二进制大小无效")
+	}
+	if err := f.Chmod(0o755); err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(f.Name(), dst)
 }
 
 // checkWritable 提前确认目录可写。没有这一步，非 root 运行、或二进制被放在系统

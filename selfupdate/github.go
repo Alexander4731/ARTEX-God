@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -115,6 +116,8 @@ func checkURL(u *url.URL) error {
 	return nil
 }
 
+const maxReleaseJSON = 4 << 20
+
 // FetchLatest 查询最新正式版。
 func FetchLatest(ctx context.Context, c *http.Client) (*Release, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
@@ -147,8 +150,15 @@ func FetchLatest(ctx context.Context, c *http.Client) (*Release, error) {
 		return nil, fmt.Errorf("GitHub 返回 %d", resp.StatusCode)
 	}
 
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, maxReleaseJSON+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 Release 失败: %w", err)
+	}
+	if len(raw) > maxReleaseJSON {
+		return nil, fmt.Errorf("Release 元数据超过 4 MiB")
+	}
 	var rel Release
-	if err := json.NewDecoder(resp.Body).Decode(&rel); err != nil {
+	if err := json.Unmarshal(raw, &rel); err != nil {
 		return nil, fmt.Errorf("解析 Release 失败: %w", err)
 	}
 	if strings.TrimSpace(rel.TagName) == "" {
