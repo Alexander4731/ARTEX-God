@@ -212,86 +212,91 @@ func TestTerminalTaskQueuedByAdmissionKeepsExecutionBarrier(t *testing.T) {
 	}
 }
 
-func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
-	if err != nil {
-		t.Skipf("postgres unavailable (%v) - skipping", err)
-	}
-	defer m.Close()
-	defer restoreConcurrencySetting(t, m)()
-	if err := m.SetConcurrency(true, 1); err != nil {
-		t.Fatal(err)
-	}
+func TestTerminalTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
+	for _, terminal := range []string{"done", "failed", "timeout"} {
+		t.Run(terminal, func(t *testing.T) {
+			m, err := NewManager(t.TempDir(), "")
+			if err != nil {
+				t.Skipf("postgres unavailable (%v) - skipping", err)
+			}
+			defer m.Close()
+			defer restoreConcurrencySetting(t, m)()
+			if err := m.SetConcurrency(true, 1); err != nil {
+				t.Fatal(err)
+			}
 
-	holder, err := m.CreateTask("timeout revival holder", "occupy slot", nil, 0, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	task, err := m.CreateTask("timed out follow-up", "run with a fresh clock", nil, 120, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer func() {
-		_, _ = m.DeleteTask(holder.ID, DeleteTaskOptions{})
-		_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{})
-	}()
-	if _, err := m.StampTaskFirstRun(task.ID); err != nil {
-		t.Fatal(err)
-	}
-	oldClock := task.lifecycleSnapshot()
-	if oldClock.FirstRunAt == 0 || oldClock.DeadlineAt == 0 {
-		t.Fatalf("test setup did not stamp the original clock: %+v", oldClock)
-	}
-	if err := m.SetTaskStatus(task.ID, "timeout"); err != nil {
-		t.Fatal(err)
-	}
+			holder, err := m.CreateTask("terminal revival holder", "occupy slot", nil, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := m.CreateTask("terminal follow-up", "run with a fresh clock", nil, 120, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				_, _ = m.DeleteTask(holder.ID, DeleteTaskOptions{})
+				_, _ = m.DeleteTask(task.ID, DeleteTaskOptions{})
+			}()
+			if _, err := m.StampTaskFirstRun(task.ID); err != nil {
+				t.Fatal(err)
+			}
+			oldClock := task.lifecycleSnapshot()
+			if oldClock.FirstRunAt == 0 || oldClock.DeadlineAt == 0 {
+				t.Fatalf("test setup did not stamp the original clock: %+v", oldClock)
+			}
+			if err := m.SetTaskStatus(task.ID, terminal); err != nil {
+				t.Fatal(err)
+			}
 
-	s := newAdmissionTestServer(m, nil)
-	s.engine.settling.Store(task.ID, true)
-	s.engine.deadline.Store(task.ID, oldClock.DeadlineAt)
-	s.engine.stamped.Store(task.ID, true)
-	s.engine.coordStarted.Store(task.ID, true)
+			s := newAdmissionTestServer(m, nil)
+			s.engine.settling.Store(task.ID, true)
+			s.engine.deadline.Store(task.ID, oldClock.DeadlineAt)
+			s.engine.stamped.Store(task.ID, true)
+			s.engine.coordStarted.Store(task.ID, true)
 
-	queued, err := s.admitTask(task, "resume")
-	if err != nil {
-		t.Fatal(err)
-	}
-	queuedState := task.lifecycleSnapshot()
-	if !queued || !queuedState.Queued || queuedState.Status != "running" ||
-		queuedState.FirstRunAt != 0 || queuedState.DeadlineAt != 0 {
-		t.Fatalf("timed-out task was not reset before FIFO wait: queued=%v state=%+v", queued, queuedState)
-	}
-	if s.engine.isSettling(task.ID) {
-		t.Fatal("timed-out task retained the old settling gate while queued")
-	}
-	if _, ok := s.engine.deadline.Load(task.ID); ok {
-		t.Fatal("timed-out task retained the old in-memory deadline")
-	}
-	if _, ok := s.engine.stamped.Load(task.ID); ok {
-		t.Fatal("timed-out task retained the old first-run stamp")
-	}
-	stored, err := m.pg.GetTask(mustTaskID(t, task.ID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored == nil || stored.TimeoutSeconds != 120 || stored.FirstRunAt != nil || stored.DeadlineAt != nil {
-		t.Fatalf("persisted timeout revival clock/config mismatch: %+v", stored)
-	}
+			queued, err := s.admitTask(task, "resume")
+			if err != nil {
+				t.Fatal(err)
+			}
+			queuedState := task.lifecycleSnapshot()
+			if !queued || !queuedState.Queued || queuedState.Status != "running" ||
+				queuedState.FirstRunAt != 0 || queuedState.DeadlineAt != 0 {
+				t.Fatalf("terminal task was not reset before FIFO wait: queued=%v state=%+v", queued, queuedState)
+			}
+			if s.engine.isSettling(task.ID) {
+				t.Fatal("terminal task retained the old settling gate while queued")
+			}
+			if _, ok := s.engine.deadline.Load(task.ID); ok {
+				t.Fatal("terminal task retained the old in-memory deadline")
+			}
+			if _, ok := s.engine.stamped.Load(task.ID); ok {
+				t.Fatal("terminal task retained the old first-run stamp")
+			}
+			stored, err := m.pg.GetTask(mustTaskID(t, task.ID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored == nil || stored.TimeoutSeconds != 120 || stored.FirstRunAt != nil || stored.DeadlineAt != nil {
+				t.Fatalf("persisted terminal revival clock/config mismatch: %+v", stored)
+			}
 
-	// Release the only slot and promote the revived task. The test server uses a
-	// cancelled root context so no real Agent call races these state assertions.
-	s.engine.Pause(holder.ID, agent.AbortPausedByUser)
-	if err := m.ApplyTaskPause(holder.ID); err != nil {
-		t.Fatal(err)
-	}
-	s.reconcileConcurrency()
-	runningState := task.lifecycleSnapshot()
-	if runningState.Queued || runningState.Paused || s.engine.isSettling(task.ID) {
-		t.Fatalf("revived task did not leave FIFO ready to execute: state=%+v enginePaused=%v settling=%v",
-			runningState, s.engine.IsPaused(task.ID), s.engine.isSettling(task.ID))
-	}
-	if _, ok := s.engine.coordStarted.Load(task.ID); ok {
-		t.Fatal("shutdown service started a deadline coordinator")
+			// Release the only slot and promote the revived task. The test server uses a
+			// cancelled root context so no real Agent call races these state assertions.
+			s.engine.Pause(holder.ID, agent.AbortPausedByUser)
+			if err := m.ApplyTaskPause(holder.ID); err != nil {
+				t.Fatal(err)
+			}
+			s.reconcileConcurrency()
+			runningState := task.lifecycleSnapshot()
+			if runningState.Queued || runningState.Paused || s.engine.isSettling(task.ID) {
+				t.Fatalf("revived task did not leave FIFO ready to execute: state=%+v enginePaused=%v settling=%v",
+					runningState, s.engine.IsPaused(task.ID), s.engine.isSettling(task.ID))
+			}
+			if _, ok := s.engine.coordStarted.Load(task.ID); ok {
+				t.Fatal("shutdown service started a deadline coordinator")
+			}
+
+		})
 	}
 }
 

@@ -1204,6 +1204,13 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 		mode = ""
 	}
 
+	// Persist admission in the same compare-and-commit as queue/paused state.
+	// This covers bootstrap, FIFO promotion and legacy created tasks whose loops
+	// already exist, without a separate Engine write racing pause/completion.
+	if status == "created" && !queued {
+		status = "running"
+	}
+
 	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
 	var committedMode string
 	err = m.pg.QueryRow(`UPDATE tasks
@@ -1225,11 +1232,11 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 	        ELSE 'resume'
 	    END,
 	    first_run_at=CASE
-	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE first_run_at
 	    END,
 	    deadline_at=CASE
-	        WHEN $6='timeout' AND $2 NOT IN ('done','failed','timeout') THEN NULL
+	        WHEN $6 IN ('done','failed','timeout') AND $2 NOT IN ('done','failed','timeout') THEN NULL
 	        ELSE deadline_at
 	    END
 	WHERE id=$1 AND deleted_at IS NULL AND status=$6
