@@ -87,6 +87,21 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	if g.interceptor == nil {
 		return hook.Result{}
 	}
+	if err := g.interceptor.CheckExecutionRecovery(ctx, ev.ToolName); err != nil {
+		return g.block(ev.ToolName, err.Error(), "")
+	}
+	allowAll, err := g.interceptor.AllowAllTaskTools(ctx)
+	if err != nil {
+		return g.block(ev.ToolName, systemBlockMessage("任务工具策略不可用: "+err.Error()), "")
+	}
+	if allowAll {
+		ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
+		decision := intercept.Decision{Action: "allow", Message: "任务策略：直接放行所有工具"}
+		if err := g.interceptor.LogChecked(ctx, intercept.ConvIDFromContext(ctx), decision, ev.ToolName, ev.Input, "allowed"); err != nil {
+			return g.block(ev.ToolName, "执行授权记录保存失败: "+err.Error(), "")
+		}
+		return hook.Result{}
+	}
 	external, _ := ctx.Value(externalReviewKey{}).(bool)
 	enabled, err := g.interceptor.CheckToolEnabled(ev.ToolName, external)
 	if err != nil {

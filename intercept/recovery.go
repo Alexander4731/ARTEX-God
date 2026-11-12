@@ -20,6 +20,12 @@ import (
 // RecoverExecutions repairs missed database writes from the SDK's existing
 // transcripts. Only unresolved, exactly correlated calls are inspected.
 func (i *Interceptor) RecoverExecutions(ctx context.Context, store *transcript.Store, taskID string) error {
+	if err := ReplayExecutionReceipts(ctx, i.db, filepath.Dir(store.MainPath("_"))); err != nil {
+		return err
+	}
+	if err := i.db.ReconcileExecutionAudits(ctx, taskID); err != nil {
+		return err
+	}
 	executions, err := i.db.UnsettledInterceptExecutions(ctx, taskID)
 	if err != nil {
 		return err

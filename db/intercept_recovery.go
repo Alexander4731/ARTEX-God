@@ -50,6 +50,7 @@ ELSE (SELECT count(*) FROM activity a WHERE a.exploration_id=t.exploration_id
  AND a.kind='tool_use' AND a.tool_use_id=ip.audit->>'tool_use_id') END
 FROM intercept_pending ip LEFT JOIN tasks t ON ip.task_id=t.id::text
 WHERE ($1='' OR ip.task_id=$1) AND ip.audit->>'effective_action'='allow'
+AND NOT EXISTS(SELECT 1 FROM tool_execution_receipts er WHERE er.approval_id=ip.id)
 AND ip.audit->>'correlation'='exact' AND ip.audit->>'resolution_source' IS NULL
 AND ip.audit->>'execution_status' IN ('unknown','awaiting_result')`, taskID)
 	if err != nil {
@@ -137,6 +138,7 @@ WHERE audit->>'execution_status'='awaiting_result'`)
 		return err
 	}
 	_, err = d.Exec(`UPDATE tasks t SET paused=true WHERE status NOT IN ('done','failed','timeout')
+AND NOT EXISTS(SELECT 1 FROM task_execution_policies p WHERE p.task_id=t.id AND p.mode='auto')
 AND EXISTS(SELECT 1 FROM intercept_pending ip WHERE ip.task_id=t.id::text
 AND ip.audit->>'execution_status'='unknown')`)
 	return err

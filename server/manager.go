@@ -818,6 +818,14 @@ func (m *Manager) AcquireRuntime(ctx context.Context, lost func(error)) (*pgdb.R
 		lock.Close()
 		return nil, err
 	}
+	if err := intercept.ReplayExecutionReceipts(ctx, m.pg, filepath.Join(m.dir, "transcripts")); err != nil {
+		lock.Close()
+		return nil, err
+	}
+	if err := m.pg.RecoverExecutionLedger(ctx); err != nil {
+		lock.Close()
+		return nil, err
+	}
 	if err := m.interceptor.RecoverExecutions(ctx, transcript.NewStore(filepath.Join(m.dir, "transcripts")), ""); err != nil {
 		lock.Close()
 		return nil, err

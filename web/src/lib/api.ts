@@ -220,6 +220,19 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
 }
 
 export const api = {
+  executionPolicy: (taskId: string) =>
+    get<{ mode: "legacy" | "observe" | "auto" }>(`/tasks/${taskId}/execution-policy`),
+  setExecutionPolicy: (taskId: string, mode: "legacy" | "observe" | "auto") =>
+    put<{ mode: "legacy" | "observe" | "auto" }>(`/tasks/${taskId}/execution-policy`, { mode }),
+  executionRecoveries: (taskId: string) =>
+    get<import("./execution-types").ExecutionRecovery[]>(`/tasks/${taskId}/execution-recoveries`),
+  decideExecutionRecovery: (
+    taskId: string,
+    id: number,
+    version: number,
+    decision: "recheck" | "park" | "accept_partial",
+    note: string,
+  ) => post<{ ok: boolean }>(`/tasks/${taskId}/execution-recoveries/${id}/decision`, { version, decision, note }),
   resolveExecution: (id: number, status: "succeeded" | "failed" | "not_executed", note: string) =>
     post<{ ok: boolean }>(`/intercept/pending/${id}/resolve-execution`, { status, note }),
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
@@ -970,7 +983,14 @@ export const api = {
   // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。
   llmRetryPolicy: () => get<LLMRetryPolicy>("/llm/retry-policy"),
   saveLLMRetryPolicy: (p: LLMRetryPolicy) => post<LLMRetryPolicy>("/llm/retry-policy", p),
-  fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number, client_compat?: boolean) =>
+  fetchLLMModels: (
+    provider: string,
+    base_url: string,
+    api_key: string,
+    proxy = "",
+    profile_id?: number,
+    client_compat?: boolean,
+  ) =>
     post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
       provider,
       base_url,
@@ -1260,6 +1280,9 @@ export const api = {
     })),
 
   // ---- intercept tool-config (全局工具拦截范围) ----
+  taskToolPolicy: (taskId: string) => get<{ allow_all: boolean }>(`/tasks/${taskId}/tool-policy`),
+  setTaskToolPolicy: (taskId: string, allowAll: boolean) =>
+    put<{ allow_all: boolean }>(`/tasks/${taskId}/tool-policy`, { allow_all: allowAll }),
   interceptGetToolConfig: async (): Promise<{ enabled_tools: string[] }> => {
     if (MOCK) return { enabled_tools: ["bash"] };
 

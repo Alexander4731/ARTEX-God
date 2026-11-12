@@ -161,6 +161,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
 	s.initSideQuestions()
+	s.engine.recoverExecution = s.recoverTaskExecutions
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
 	s.applyRetryPolicy()
@@ -957,6 +958,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/intercept/history/{id}/execution", s.interceptExecution)
 	mux.HandleFunc("GET /api/intercept/task/{taskID}", s.interceptListTaskItems)
 	mux.HandleFunc("GET /api/intercept/tool-config", s.interceptGetToolConfig)
+	mux.HandleFunc("GET /api/tasks/{id}/tool-policy", s.taskToolPolicy)
+	mux.HandleFunc("PUT /api/tasks/{id}/tool-policy", s.taskToolPolicy)
+	mux.HandleFunc("GET /api/tasks/{id}/execution-policy", s.executionPolicy)
+	mux.HandleFunc("PUT /api/tasks/{id}/execution-policy", s.executionPolicy)
+	mux.HandleFunc("GET /api/tasks/{id}/execution-recoveries", s.executionRecoveries)
+	mux.HandleFunc("POST /api/tasks/{id}/execution-recoveries/{executionID}/decision", s.executionRecoveryDecision)
 	mux.HandleFunc("PUT /api/intercept/tool-config", s.interceptSetToolConfig)
 	mux.HandleFunc("GET /api/intercept/judge", s.interceptGetJudgeConfig)
 	mux.HandleFunc("PUT /api/intercept/judge", s.interceptSetJudgeConfig)

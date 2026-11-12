@@ -250,7 +250,8 @@ const approvalRowSelectWithAudit = `SELECT ` + approvalRowColumns + `, ip.audit`
 // unknown; it must remain visible until that separate problem is resolved.
 func (d *DB) ListActionableIntercepts(taskID string) ([]InterceptApprovalRow, error) {
 	rows, err := d.Query(approvalRowSelect+` WHERE ($1='' OR ip.task_id=$1)
-AND (ip.status='pending' OR ip.audit->>'execution_status'='unknown') ORDER BY ip.created_at,ip.id`, taskID)
+AND (ip.status='pending' OR (ip.audit->>'execution_status'='unknown'
+AND NOT EXISTS(SELECT 1 FROM task_execution_policies p WHERE p.task_id::text=ip.task_id AND p.mode='auto'))) ORDER BY ip.created_at,ip.id`, taskID)
 	if err != nil {
 		return nil, err
 	}

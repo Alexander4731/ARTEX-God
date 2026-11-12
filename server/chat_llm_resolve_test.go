@@ -4,6 +4,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -16,9 +17,16 @@ func TestChatUnavailableReasonDistinguishesStates(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
 	s := New(context.Background(), m, td, td, td)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// Start from a clean profile table; other tests in the shared DB may have left rows.
 	existing, _ := m.pg.ListProfiles()
@@ -66,9 +74,16 @@ func TestResolveChatAgentHonoursConversationProfile(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { m.Close() })
 	td := t.TempDir()
 	s := New(context.Background(), m, td, td, td)
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := s.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+	})
 
 	// Force the global fallback to nil so a non-nil result can ONLY come from the
 	// conversation's own profile — this is exactly the situation the user hit

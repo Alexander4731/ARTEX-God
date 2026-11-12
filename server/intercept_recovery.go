@@ -16,8 +16,23 @@ func (s *Server) interceptResolveExecution(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	var request struct {
+		// Automatic recovery decisions use the separate versioned endpoint.
 		Status string `json:"status"`
 		Note   string `json:"note"`
+	}
+	if detail, err := pg.GetInterceptDetail(id); err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	} else if detail != nil && detail.TaskID != nil {
+		policy, err := pg.ExecutionPolicy(r.Context(), *detail.TaskID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		if policy.Mode == "auto" {
+			writeErr(w, 409, "此任务使用自动执行恢复，请在执行恢复记录中提交处理决定；原始执行证据不会被覆盖")
+			return
+		}
 	}
 	if err := decode(r, &request); err != nil {
 		writeErr(w, 400, "请求格式错误")

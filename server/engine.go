@@ -91,10 +91,11 @@ func retryableWorkerModelError(reason harness.TerminalReason, err error) bool {
 // (re)installed at runtime (LLM configured from the UI); the loops always run
 // but idle until an LLM is set.
 type Engine struct {
-	phases   sync.Map
-	stopping bool // guarded by deleteMu
-	m        *Manager
-	debounce time.Duration
+	recoverExecution func(context.Context, *Task)
+	phases           sync.Map
+	stopping         bool // guarded by deleteMu
+	m                *Manager
+	debounce         time.Duration
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
@@ -767,10 +768,11 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
-	rt := e.registerTaskRoutines(ctx, t.ID, 1+workers)
+	rt := e.registerTaskRoutines(ctx, t.ID, 2+workers)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
+	runTaskRoutine(rt, func(loopCtx context.Context) { e.executionRecoveryLoop(loopCtx, t) })
 	for i := 0; i < workers; i++ {
 		name := fmt.Sprintf("work#%d", i+1)
 		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, name) })
@@ -1056,6 +1058,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	label := fmt.Sprintf("%s · #%d", name, iid)
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
 	workCtx = intercept.WithIntent(workCtx, iid)
+	workCtx = intercept.WithRecoverySummary(workCtx, e.m.pg.RecoverySummary(workCtx, t.ID, iid))
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
@@ -1130,12 +1133,21 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		}
 	}
 	for {
-		unknown, checkErr := e.m.pg.HasUnknownTaskExecution(t.ID)
+		checkErr := e.m.pg.FinishIntentExecutionAudit(t.ID, intent.ID)
+		unknown := false
+		policy, policyErr := e.m.pg.ExecutionPolicy(context.WithoutCancel(ctx), t.ID)
 		if checkErr == nil {
-			checkErr = e.m.pg.FinishIntentExecutionAudit(t.ID, intent.ID)
+			checkErr = policyErr
 		}
 		if checkErr == nil {
-			unknown, checkErr = e.m.hasUnknownTaskExecution(t.ID)
+			if policy.Mode == "auto" {
+				checkErr = e.m.pg.QueueExecutionRecoveries(context.WithoutCancel(ctx), t.ID)
+				if checkErr == nil {
+					unknown, checkErr = e.m.pg.HasUnknownIntentExecution(context.WithoutCancel(ctx), t.ID, intent.ID)
+				}
+			} else {
+				unknown, checkErr = e.m.hasUnknownTaskExecution(t.ID)
+			}
 		}
 		if checkErr != nil {
 			if sleepCtx(ctx, time.Second) {
@@ -1145,9 +1157,17 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			continue
 		}
 		if unknown {
-			state = "paused"
-			blockedReason = db.IntentBlockedExecutionUnknown
-			e.pauseForInput(t, "工具执行结果尚未确认，请在审批记录中核验后再恢复任务")
+			if policy.Mode == "auto" {
+				// Preserve deliberate user/Planner stops. Only recovery-owned pauses
+				// may later be reopened by the coordinator.
+				if action == "" && !killed && state != "stopped" {
+					state, blockedReason = "paused", db.IntentBlockedRecovery
+				}
+			} else {
+				state = "paused"
+				blockedReason = db.IntentBlockedExecutionUnknown
+				e.pauseForInput(t, "工具执行结果尚未确认，请在审批记录中核验后再恢复任务")
+			}
 		}
 		break
 	}
@@ -1179,7 +1199,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
 func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
-	if unknown, err := e.m.hasUnknownTaskExecution(t.ID); err != nil {
+	if unknown, err := e.m.executionBlocksIntent(ctx, t.ID, intentID); err != nil {
 		return err
 	} else if unknown {
 		return fmt.Errorf("请先在审批记录中核验未确认的工具执行结果")

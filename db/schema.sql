@@ -1334,6 +1334,11 @@ CREATE TABLE IF NOT EXISTS task_intercept_rules (
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_task_intercept_task ON task_intercept_rules(task_id);
+-- Tool approval policy is task-local and is never inherited by another task.
+CREATE TABLE IF NOT EXISTS task_tool_policies (
+    task_id BIGINT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE,
+    allow_all BOOLEAN NOT NULL DEFAULT false
+);
 -- 补旧库(本会话早前建过该表、无 action 列)：加列(带 IF NOT EXISTS)。
 ALTER TABLE task_intercept_rules ADD COLUMN IF NOT EXISTS action TEXT NOT NULL DEFAULT 'block';
 DROP TRIGGER IF EXISTS trg_task_intercept_rules_upd ON task_intercept_rules;

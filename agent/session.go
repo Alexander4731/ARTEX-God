@@ -8,7 +8,6 @@ import (
 	"iter"
 	"strings"
 
-	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/norma/tool"
 
 	"github.com/Autumn-27/norma/agentcore"
@@ -19,13 +18,8 @@ func newAgentSession(opts agentcore.Options) *agentcore.Session {
 	if opts.Tools == nil {
 		opts.Tools = tool.DefaultTools()
 	}
-	// NewSession appends these tools after supplied tools and may replace a tool
-	// with the same name. Keep their pre-hook active instead of deferring it to a
-	// wrapper the SDK would discard. Plan/memory/skill additions use SDK hooks.
-	if opts.Plan == nil && opts.Memory == nil && opts.Skills == nil {
-		opts.Hooks, opts.Tools = guard.WithExecutionReview(opts.Hooks, opts.Tools,
-			"WebFetch", "WebSearch", "TodoWrite", "AskUserQuestion", "TaskOutput", "TaskStop", "TaskList", "Monitor", "SearchExtraTools", "ExecuteExtraTool")
-	}
+	// The pinned SDK now supplies exact call IDs to pre-hooks for every tool,
+	// including SDK-owned tools. Admission must precede execution observation.
 	call := opts.Deps.CallModel
 	if call == nil && opts.Provider != nil {
 		call = opts.Provider.Stream
@@ -88,10 +82,16 @@ func completeToolTurn(ctx context.Context, stream iter.Seq2[llm.StreamEvent, err
 		// Validate the whole batch before dispatching its first call. The SDK
 		// otherwise replaces malformed/truncated arguments with an empty object.
 		var input strings.Builder
+		callIDs := map[string]bool{}
 		validate := func() bool { return input.Len() == 0 || json.Valid([]byte(input.String())) }
 		for _, ev := range pending {
 			switch ev.Type {
 			case llm.SEToolUseStart:
+				if ev.ToolID == "" || callIDs[ev.ToolID] {
+					fail(fmt.Errorf("model returned a missing or duplicate tool call ID"))
+					return
+				}
+				callIDs[ev.ToolID] = true
 				if !validate() {
 					fail(fmt.Errorf("model returned incomplete or invalid tool arguments"))
 					return

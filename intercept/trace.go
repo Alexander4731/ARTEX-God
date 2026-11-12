@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/norma/tool"
 	"github.com/Autumn-27/norma/transcript"
 )
 
@@ -35,11 +36,14 @@ func WithIntent(ctx context.Context, id int64) context.Context {
 type completion func(status, output string, truncated bool)
 
 type tracedCall struct {
-	key       string
-	audit     db.InterceptAudit
-	claimed   bool
-	ambiguous bool
-	complete  []completion
+	key           string
+	audit         db.InterceptAudit
+	claimed       bool
+	ambiguous     bool
+	complete      []completion
+	streamDone    bool
+	executorOwned bool
+	receipts      []tool.ExecutionObserver
 }
 
 // Trace belongs to ONE Prompt invocation. Wrapped tools supply their execution
@@ -62,7 +66,8 @@ func WithTrace(ctx context.Context, user string, prior []db.InterceptContextEntr
 	for _, e := range prior {
 		t.append(e)
 	}
-	return context.WithValue(ctx, traceKey{}, t), t
+	ctx = context.WithValue(ctx, traceKey{}, t)
+	return tool.WithExecutionObserver(ctx, t.observeExecution), t
 }
 
 // UseTranscript supplies the existing SDK log for recording the exact position
@@ -120,6 +125,7 @@ func WithExecutionCall(ctx context.Context, id string) context.Context {
 // WithCall claims the event before model review starts, so subsequent tools
 // cannot change this approval's context while the judge is running.
 func WithCall(ctx context.Context, tool string, input []byte) context.Context {
+	ctx = withSDKExecutionCall(ctx)
 	if _, claimed := ctx.Value(callKey{}).(db.InterceptAudit); claimed {
 		return ctx
 	}
@@ -161,9 +167,19 @@ func (t *Trace) bind(id string, f completion) {
 func (t *Trace) Complete(id, output string, isError bool) {
 	t.mu.Lock()
 	c := t.calls[id]
-	delete(t.calls, id)
+	var callbacks []completion
+	if c != nil {
+		callbacks = append(callbacks, c.complete...)
+	}
+	if c != nil {
+		c.streamDone = true
+	}
+	executorOwned := c != nil && c.executorOwned
 	t.mu.Unlock()
-	if c == nil || c.complete == nil {
+	if executorOwned && !(isError && output == "tool execution interrupted") {
+		return
+	}
+	if len(callbacks) == 0 {
 		return
 	}
 	status := "succeeded"
@@ -176,7 +192,7 @@ func (t *Trace) Complete(id, output string, isError bool) {
 		}
 	}
 	out, cut := bounded(output, outputLimit)
-	for _, complete := range c.complete {
+	for _, complete := range callbacks {
 		complete(status, out, cut)
 	}
 }
@@ -185,13 +201,16 @@ func (t *Trace) Complete(id, output string, isError bool) {
 // been interrupted or its final event lost; this is distinct from a tool error.
 func (t *Trace) Finish() {
 	t.mu.Lock()
-	calls := t.calls
-	t.calls = make(map[string]*tracedCall)
-	t.mu.Unlock()
-	for _, c := range calls {
-		for _, complete := range c.complete {
-			complete("unknown", "执行结束但未收到工具结果", false)
+	var callbacks []completion
+	for _, c := range t.calls {
+		if !c.streamDone {
+			callbacks = append(callbacks, c.complete...)
+			c.streamDone = true
 		}
+	}
+	t.mu.Unlock()
+	for _, complete := range callbacks {
+		complete("unknown", "执行结束但未收到工具结果", false)
 	}
 }
 
@@ -230,7 +249,7 @@ func auditFor(ctx context.Context, dec Decision, input []byte, status string) *d
 	return &a
 }
 
-func (i *Interceptor) bindResult(ctx context.Context, id int64, audit *db.InterceptAudit) {
+func (i *Interceptor) bindResult(ctx context.Context, id int64, audit *db.InterceptAudit, toolName string) {
 	t, _ := ctx.Value(traceKey{}).(*Trace)
 	if t == nil || audit.Correlation != "exact" || audit.ToolUseID == "" {
 		return
@@ -240,6 +259,7 @@ func (i *Interceptor) bindResult(ctx context.Context, id int64, audit *db.Interc
 			log.Printf("[intercept] execution result update failed (approval=%d, tool_use_id=%s): %v", id, audit.ToolUseID, err)
 		}
 	})
+	t.bindExecution(i.db, id, *audit, toolName)
 }
 
 func digestInput(input []byte) string {

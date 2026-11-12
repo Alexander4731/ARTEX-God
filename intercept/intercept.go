@@ -610,7 +610,7 @@ func (i *Interceptor) LogChecked(ctx context.Context, convID int64, dec Decision
 	audit := auditFor(ctx, dec, input, status)
 	id, err := i.db.CreateDecidedIntercept(dec.RuleID, convID, taskID, agentName, toolName, input, status, dec.Message, audit)
 	if err == nil {
-		i.bindResult(ctx, id, audit)
+		i.bindResult(ctx, id, audit, toolName)
 	}
 	return err
 }
@@ -648,7 +648,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	i.pending.ch[pendingID] = ch
 	i.pending.mu.Unlock()
 
-	i.bindResult(ctx, pendingID, audit)
+	i.bindResult(ctx, pendingID, audit, toolName)
 	defer i.pending.remove(pendingID)
 	// Polling clients can decide after INSERT commits but before the channel is
 	// registered. Re-read after registration so that decision cannot be lost;

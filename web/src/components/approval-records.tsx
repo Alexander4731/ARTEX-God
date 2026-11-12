@@ -99,7 +99,7 @@ function ApprovalOrigin({ row, detail = false }: { row: InterceptApprovalRow; de
 }
 
 function StatusBadge({ status, executionStatus }: { status: string; executionStatus?: string }) {
-  if (executionStatus === "unknown") return <Badge variant="destructive">执行结果待核验</Badge>;
+  if (executionStatus === "unknown") return <Badge variant="outline">执行结果未知</Badge>;
   const labels: Record<string, string> = { pending: "待审批", allowed: "已允许", denied: "已拒绝", timeout: "已超时" };
   let variant: "default" | "destructive" | "secondary" | "outline" = "outline";
   if (status === "allowed") variant = "default";
@@ -303,6 +303,23 @@ export function ApprovalDetail({
   const [error, setError] = React.useState("");
   const [retry, setRetry] = React.useState(0);
   const [more, setMore] = React.useState(defaultExpanded);
+  const [automaticRecovery, setAutomaticRecovery] = React.useState(false);
+  React.useEffect(() => {
+    let alive = true;
+    if (row.task_id) {
+      api
+        .executionPolicy(row.task_id)
+        .then((policy) => {
+          if (alive) setAutomaticRecovery(policy.mode === "auto");
+        })
+        .catch(() => {
+          if (alive) setAutomaticRecovery(false);
+        });
+    }
+    return () => {
+      alive = false;
+    };
+  }, [row.task_id, revision]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Status, refresh and retry invalidate details without closing the panel.
   React.useEffect(() => {
@@ -438,7 +455,12 @@ export function ApprovalDetail({
           <AlertDescription>此记录未保存审批详情快照，无法还原当时的上下文、模型初判和执行输出。</AlertDescription>
         </Alert>
       ) : null}
-      {!readOnly && audit?.execution_status === "unknown" ? (
+      {automaticRecovery && audit?.execution_status === "unknown" && (
+        <p className="text-sm text-muted-foreground">
+          原执行状态保留为未知。自动核验进度和处理方式请查看此任务的“执行恢复记录”。
+        </p>
+      )}
+      {!readOnly && !automaticRecovery && audit?.execution_status === "unknown" ? (
         <div className="space-y-2 rounded-lg border border-amber-500/40 p-4">
           <p className="text-sm">该操作已经获批，但执行结果尚未确认，因此任务已暂停。请核验结果后继续任务。</p>
           <label className="text-sm" htmlFor={`execution-note-${row.id}`}>
