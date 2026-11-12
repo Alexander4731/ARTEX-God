@@ -269,20 +269,20 @@ func (d *DB) CommitRecovery(ctx context.Context, e ExecutionRecord, state, effec
 		return false, err
 	}
 	defer tx.Rollback()
-	// Serialize against receipts before checking their version.
+	var controlVersion int64
+	if err = tx.QueryRowContext(ctx, `SELECT execution_control_version FROM tasks WHERE id::text=$1 FOR UPDATE`, e.TaskID).Scan(&controlVersion); err != nil {
+		return false, err
+	}
+	if controlVersion != e.ControlVersion {
+		return false, nil
+	}
+	// Lock task before receipt, matching archive completion; then fence evidence.
 	var version int64
 	err = tx.QueryRowContext(ctx, `SELECT version FROM tool_execution_receipts WHERE approval_id=$1 FOR UPDATE`, e.ID).Scan(&version)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return false, err
 	}
 	if version != e.EvidenceVersion {
-		return false, nil
-	}
-	var controlVersion int64
-	if err = tx.QueryRowContext(ctx, `SELECT execution_control_version FROM tasks WHERE id::text=$1 FOR UPDATE`, e.TaskID).Scan(&controlVersion); err != nil {
-		return false, err
-	}
-	if controlVersion != e.ControlVersion {
 		return false, nil
 	}
 	res, err := tx.ExecContext(ctx, `UPDATE execution_recoveries r SET state=$4,effect_state=$5,decision=$6,claim_token='',lease_until=NULL,version=version+1,last_error='',updated_at=now()

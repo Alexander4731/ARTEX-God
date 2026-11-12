@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"sync/atomic"
 	"testing"
 )
 
@@ -57,5 +60,31 @@ func TestNotificationDirectAndInvalidRoute(t *testing.T) {
 				t.Fatal("unsafe redirect accepted")
 			}
 		}
+	}
+}
+
+func TestNotificationEnvironmentProxyDelivery(t *testing.T) {
+	if os.Getenv("ARTEX_NOTIFY_PROXY_CHILD") == "1" {
+		if _, err := doJSON(WithHTTPRoute(t.Context(), "legacy_environment"), "POST", "http://notification.invalid/hook", nil, map[string]string{"text": "fixture"}); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	var received atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Host != "notification.invalid" || r.URL.Path != "/hook" {
+			t.Errorf("unexpected proxy target: %s", r.URL)
+		}
+		received.Add(1)
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer proxy.Close()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestNotificationEnvironmentProxyDelivery$")
+	cmd.Env = append(os.Environ(), "ARTEX_NOTIFY_PROXY_CHILD=1", AllowLocalTargetsEnv+"=1", "HTTP_PROXY="+proxy.URL, "http_proxy="+proxy.URL, "NO_PROXY=", "no_proxy=")
+	if raw, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("proxy delivery: %v %s", err, raw)
+	}
+	if received.Load() != 1 {
+		t.Fatal("environment route bypassed proxy")
 	}
 }

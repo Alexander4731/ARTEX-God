@@ -309,6 +309,8 @@ func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb
 		if err := archiveExecutionFiles(extracted, snapshot, true); err != nil {
 			return err
 		}
+	} else if _, err := os.Lstat(filepath.Join(extracted, "executions")); !os.IsNotExist(err) {
+		return fmt.Errorf("旧格式归档不能携带未经身份验证的执行文件")
 	}
 	var llmRecordsFile *os.File
 	relative, hasStreamedLLMRecords := snapshot.StreamedTables["llm_records"]

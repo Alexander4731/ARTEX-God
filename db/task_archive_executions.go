@@ -36,7 +36,7 @@ func ValidateArchiveExecutions(s *TaskArchiveSnapshot) error {
 	ids := make(map[int64]bool, len(approvals))
 	for _, p := range approvals {
 		id, ok := jsonInt64(p["id"])
-		if !ok || id <= 0 {
+		if !ok || id <= 0 || p["task_id"] != strconv.FormatInt(s.TaskID, 10) {
 			return fmt.Errorf("invalid archived approval")
 		}
 		ids[id] = true
