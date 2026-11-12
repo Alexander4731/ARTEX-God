@@ -37,23 +37,37 @@ export function ExecutionRecoveries({ taskId }: { taskId: string }) {
   const [items, setItems] = React.useState<ExecutionRecovery[]>([]);
   const [error, setError] = React.useState("");
   const [saving, setSaving] = React.useState(false);
+  const [pageCount, setPageCount] = React.useState(1);
+  const [hasMore, setHasMore] = React.useState(false);
+  const [loading, setLoading] = React.useState(false);
   const [revision, refresh] = React.useReducer((n: number) => n + 1, 0);
   const id = React.useId();
   React.useEffect(() => {
     let alive = true;
     let timer: ReturnType<typeof setTimeout>;
     async function load() {
+      if (alive) setLoading(true);
       try {
-        const [policy, rows] = await Promise.all([api.executionPolicy(taskId), api.executionRecoveries(taskId)]);
+        const [policy, firstPage] = await Promise.all([api.executionPolicy(taskId), api.executionRecoveries(taskId)]);
+        const rows = [...firstPage];
+        let page = firstPage;
+        for (let index = 1; index < pageCount && page.length === 100 && alive; index++) {
+          page = await api.executionRecoveries(taskId, page[page.length - 1].id);
+          rows.push(...page);
+        }
         if (alive) {
           setMode(policy.mode);
           setItems(rows);
           setError("");
+          setHasMore(page.length === 100);
         }
       } catch (e) {
         if (alive) setError((e as Error).message);
       } finally {
-        if (alive) timer = setTimeout(load, 5000);
+        if (alive) {
+          setLoading(false);
+          timer = setTimeout(load, 5000);
+        }
       }
     }
     void load();
@@ -61,7 +75,7 @@ export function ExecutionRecoveries({ taskId }: { taskId: string }) {
       alive = false;
       clearTimeout(timer);
     };
-  }, [taskId, revision]);
+  }, [taskId, revision, pageCount]);
 
   async function save(enabled: boolean) {
     setSaving(true);
@@ -102,7 +116,9 @@ export function ExecutionRecoveries({ taskId }: { taskId: string }) {
       )}
       {mode === "observe" && <p className="text-sm">当前为观察模式：记录核验建议，保留原调度方式。</p>}
       <div className="flex items-center justify-between">
-        <p className="text-sm">执行恢复记录{waiting > 0 ? ` · ${waiting} 项需要处理` : ""}</p>
+        <p className="text-sm">
+          执行恢复记录 · 已加载 {items.length} 条{waiting > 0 ? ` · 已加载记录中 ${waiting} 项需要处理` : ""}
+        </p>
         <Button size="sm" variant="ghost" onClick={refresh}>
           刷新
         </Button>
@@ -113,6 +129,11 @@ export function ExecutionRecoveries({ taskId }: { taskId: string }) {
       {items.map((item) => (
         <RecoveryItem key={item.id} item={item} taskId={taskId} onChange={refresh} />
       ))}
+      {hasMore && (
+        <Button variant="outline" size="sm" disabled={loading} onClick={() => setPageCount((n) => n + 1)}>
+          {loading ? "正在加载…" : "加载更早的恢复记录"}
+        </Button>
+      )}
     </section>
   );
 }

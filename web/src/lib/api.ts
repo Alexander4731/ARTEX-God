@@ -224,8 +224,8 @@ export const api = {
     get<{ mode: "legacy" | "observe" | "auto" }>(`/tasks/${taskId}/execution-policy`),
   setExecutionPolicy: (taskId: string, mode: "legacy" | "observe" | "auto") =>
     put<{ mode: "legacy" | "observe" | "auto" }>(`/tasks/${taskId}/execution-policy`, { mode }),
-  executionRecoveries: (taskId: string) =>
-    get<import("./execution-types").ExecutionRecovery[]>(`/tasks/${taskId}/execution-recoveries`),
+  executionRecoveries: (taskId: string, before?: number) =>
+    get<import("./execution-types").ExecutionRecovery[]>(`/tasks/${taskId}/execution-recoveries${before ? `?before=${before}` : ""}`),
   decideExecutionRecovery: (
     taskId: string,
     id: number,

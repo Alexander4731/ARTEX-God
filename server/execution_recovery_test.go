@@ -110,6 +110,9 @@ func TestExecutionRecoveryHTTPIsolation(t *testing.T) {
 		return w
 	}
 	base := fmt.Sprintf("/api/tasks/%d", first.ID)
+	if w := request(http.MethodGet, base+"/execution-recoveries?before=-1", "", true); w.Code != 400 {
+		t.Fatal("invalid recovery cursor", w.Code)
+	}
 	if w := request(http.MethodPut, base+"/execution-policy", `{"mode":"auto"}`, false); w.Code != 401 {
 		t.Fatal(w.Code)
 	}

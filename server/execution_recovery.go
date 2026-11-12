@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
@@ -86,7 +87,7 @@ func (s *Server) recoverTaskExecutions(ctx context.Context, t *Task) {
 			var evidence []recovery.Evidence
 			decision, evidence, err = recovery.Review(ctx, s.agentsForTask(t).workerRuntime.Complete, dir, goal, *e)
 			if err != nil {
-				_ = d.DeferExecutionRecovery(context.WithoutCancel(ctx), *e, err.Error(), ctx.Err() == nil)
+				_ = s.deferFailedExecutionRecovery(ctx, *e, err)
 				return
 			}
 			// Keep the exact evidence supplied to the model alongside its conclusion.
@@ -103,6 +104,14 @@ func (s *Server) recoverTaskExecutions(ctx context.Context, t *Task) {
 	}
 	raw, _ := json.Marshal(map[string]any{"verdict": decision})
 	_, _ = d.CommitRecovery(ctx, *e, state, decision.EffectState, source, raw)
+}
+
+func (s *Server) deferFailedExecutionRecovery(ctx context.Context, e db.ExecutionRecord, cause error) error {
+	cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	// A deadline consumed the model budget. Explicit cancellation (pause/stop)
+	// does not charge an attempt, but must still release the claim promptly.
+	return s.m.pg.DeferExecutionRecovery(cleanup, e, cause.Error(), ctx.Err() != context.Canceled)
 }
 
 func (s *Server) executionPolicy(w http.ResponseWriter, r *http.Request) {
@@ -155,11 +164,20 @@ func (s *Server) executionRecoveries(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	taskID := strconv.FormatInt(id, 10)
+	var before int64
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		var err error
+		before, err = strconv.ParseInt(raw, 10, 64)
+		if err != nil || before <= 0 {
+			writeErr(w, 400, "invalid recovery cursor")
+			return
+		}
+	}
 	if err := pg.QueueExecutionRecoveries(r.Context(), taskID); err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
-	rows, err := pg.ListExecutionRecoveries(r.Context(), taskID)
+	rows, err := pg.ListExecutionRecoveries(r.Context(), taskID, before)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return

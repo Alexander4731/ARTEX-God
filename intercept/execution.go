@@ -100,13 +100,14 @@ func (t *Trace) bindExecution(d *db.DB, id int64, a db.InterceptAudit, toolName 
 			// Snapshot before norma's Forget/Session.Close can remove the source.
 			if dir != "" {
 				if err := os.MkdirAll(dir, 0700); err != nil {
-					return err
-				}
-				destination := filepath.Join(dir, "process-output.txt")
-				if err := copyExecutionOutput(event.OutputPath, destination); err != nil {
-					log.Printf("[execution] output snapshot %d: %v", id, err)
+					log.Printf("[execution] output directory %d unavailable, retaining database receipt: %v", id, err)
 				} else {
-					event.OutputPath = destination
+					destination := filepath.Join(dir, "process-output.txt")
+					if err := copyExecutionOutput(event.OutputPath, destination); err != nil {
+						log.Printf("[execution] output snapshot %d: %v", id, err)
+					} else {
+						event.OutputPath = destination
+					}
 				}
 			}
 			if f, err := os.Open(event.OutputPath); err == nil {
