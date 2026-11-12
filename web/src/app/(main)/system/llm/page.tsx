@@ -327,6 +327,7 @@ function ProfileSheet({
   const [streaming, setStreaming] = React.useState(true); // true=流式(默认);false=非流式
   const [maxTokens, setMaxTokens] = React.useState("0"); // 单次回复输出上限;0=不发送
   const [maxTokensField, setMaxTokensField] = React.useState(NONE); // 上限用哪个字段名;NONE=max_tokens
+  const [omitSignatures, setOmitSignatures] = React.useState(false);
   const [clientCompat, setClientCompat] = React.useState(false);
   const [sessionHeaderKey, setSessionHeaderKey] = React.useState(""); // 自定义会话头名;空=不发送
   const [retry, setRetry] = React.useState<LLMRetryOverride>(ZERO_OVERRIDE); // 本配置的重试覆盖;全 0=跟随全局
@@ -357,6 +358,7 @@ function ProfileSheet({
     setMaxTokensField(fromStore(profile?.max_tokens_field));
     setSessionHeaderKey(profile?.session_header_key ?? "");
     setClientCompat(profile?.client_compat ?? false);
+    setOmitSignatures(profile?.omit_thought_signatures ?? false);
     setRetry(profile?.retry ?? ZERO_OVERRIDE);
     setApiKey("");
     setKeyHint(profile?.api_key_hint ?? "");
@@ -448,6 +450,7 @@ function ProfileSheet({
         max_tokens_field: format === "openai" ? toStore(maxTokensField) : "",
         session_header_key: sessionHeaderKey.trim(),
         client_compat: clientCompat,
+        omit_thought_signatures: omitSignatures,
         retry,
       });
       if (isNew) toast.success(`已新建：${name.trim()}（在卡片上「设为激活」以启用）`);
@@ -593,6 +596,14 @@ function ProfileSheet({
             </div>
             <Switch id="p-client-compat" checked={clientCompat} onCheckedChange={setClientCompat} />
           </div>
+
+          {format === "openai" && <div className="flex items-start justify-between gap-4 rounded-lg border p-3">
+            <div className="grid gap-1.5">
+              <Label htmlFor="p-omit-signatures">省略历史工具签名</Label>
+              <p className="text-muted-foreground text-xs">仅在网关明确拒绝工具扩展字段时开启。Gemini 工具续聊通常需要保留签名。</p>
+            </div>
+            <Switch id="p-omit-signatures" checked={omitSignatures} onCheckedChange={setOmitSignatures} />
+          </div>}
 
           <div className="grid gap-2">
             <Label htmlFor="p-session-header">自定义会话头（可选）</Label>

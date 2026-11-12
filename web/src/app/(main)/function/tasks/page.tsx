@@ -470,11 +470,17 @@ export default function TasksPage() {
   // POLL_MS but usually comes back unchanged, and setTasks on an identical payload would
   // re-render the whole page for nothing. Bail out when it matches.
   const lastRef = React.useRef<string>("");
+  const listEpoch = React.useRef(0);
+  const listPending = React.useRef(false);
 
-  const load = React.useCallback(() => {
+  const load = React.useCallback((force = true) => {
+    if (!force && listPending.current) return;
+    const epoch = ++listEpoch.current;
+    listPending.current = true;
     api
       .tasks()
       .then((r) => {
+        if (epoch !== listEpoch.current) return;
         const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
         const sig = JSON.stringify(next);
         if (sig === lastRef.current) return;
@@ -483,7 +489,7 @@ export default function TasksPage() {
       })
       .catch(() => {
         // Polling is best-effort; the next interval retries automatically.
-      });
+      }).finally(() => { if (epoch === listEpoch.current) listPending.current = false; });
   }, []);
 
   const loadCategories = React.useCallback(() => {
@@ -501,8 +507,8 @@ export default function TasksPage() {
   React.useEffect(() => {
     load();
     loadCategories();
-    const i = setInterval(load, POLL_MS);
-    return () => clearInterval(i);
+    const i = setInterval(() => load(false), POLL_MS);
+    return () => { clearInterval(i); listEpoch.current++; listPending.current = false; };
   }, [load, loadCategories]);
 
   const refreshCategoriesAndTasks = React.useCallback(() => {
@@ -1676,8 +1682,13 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
   const [selected, setSelected] = React.useState<Set<number>>(() => new Set());
   const [loading, setLoading] = React.useState(true);
   const pendingRestoreIDs = React.useRef(new Set<number>());
+  const requestEpoch = React.useRef(0);
+  const requestPending = React.useRef(false);
 
-  const load = React.useCallback(async () => {
+  const load = React.useCallback(async (force = true) => {
+    if (!force && requestPending.current) return;
+    const epoch = ++requestEpoch.current;
+    requestPending.current = true;
     try {
       const result = await api.taskArchives({
         page,
@@ -1685,6 +1696,7 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
         q: query.trim(),
         state: stateFilter === "all" ? undefined : stateFilter,
       });
+      if (epoch !== requestEpoch.current) return;
       setArchives(result.items);
       setTotal(result.total);
       setSelected((current) => {
@@ -1694,6 +1706,7 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
       const pending = [...pendingRestoreIDs.current];
       if (pending.length > 0) {
         const states = await Promise.allSettled(pending.map((id) => api.taskArchive(id)));
+        if (epoch !== requestEpoch.current) return;
         let restored = false;
         states.forEach((state, index) => {
           if (state.status !== "rejected" || !(state.reason instanceof Error)) return;
@@ -1704,16 +1717,16 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
         if (restored) onChanged();
       }
     } catch (error) {
-      toast.error(`读取归档列表失败：${(error as Error).message}`);
+      if (epoch === requestEpoch.current) toast.error(`读取归档列表失败：${(error as Error).message}`);
     } finally {
-      setLoading(false);
+      if (epoch === requestEpoch.current) { setLoading(false); requestPending.current = false; }
     }
   }, [onChanged, page, pageSize, query, stateFilter]);
 
   React.useEffect(() => {
     void load();
-    const timer = setInterval(() => void load(), 2_000);
-    return () => clearInterval(timer);
+    const timer = setInterval(() => void load(false), 2_000);
+    return () => { clearInterval(timer); requestEpoch.current++; requestPending.current = false; };
   }, [load]);
 
   const selectable = React.useMemo(

@@ -1,5 +1,6 @@
 "use client";
 
+import { cloneJson } from "@/lib/json";
 import * as React from "react";
 import { toast } from "sonner";
 import { PlayIcon, PlusIcon, RotateCcwIcon, SaveIcon, SearchIcon, Trash2Icon } from "lucide-react";
@@ -111,7 +112,7 @@ function coerceDefault(type: string, raw: string): unknown {
 // applyRows writes edited rows back into a deep-copied schema (structure untouched).
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applyRows(schema: Record<string, any>, rows: ParamRow[]): Record<string, any> {
-  const next = structuredClone(schema ?? {});
+  const next = cloneJson(schema ?? {});
   const props = (next.properties ?? {}) as Record<string, Record<string, unknown>>;
   for (const r of rows) {
     if (r.parentKey) {

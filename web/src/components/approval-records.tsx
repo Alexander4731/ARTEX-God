@@ -1,5 +1,6 @@
 "use client";
 
+import { listenMedia, matchesMedia } from "@/lib/media-query";
 import * as React from "react";
 
 import {
@@ -602,14 +603,15 @@ export function ApprovalDetail({
 // expansion cannot create empty columns and leave a gap in the selected row.
 const approvalBreakpoints = ["(min-width: 40rem)", "(min-width: 48rem)", "(min-width: 64rem)", "(min-width: 80rem)"];
 function subscribeColumns(onChange: () => void) {
+  if (typeof window.matchMedia !== "function") return () => undefined;
   const queries = approvalBreakpoints.map((query) => window.matchMedia(query));
-  for (const query of queries) query.addEventListener("change", onChange);
+  const cleanups = queries.map((query) => listenMedia(query, onChange));
   return () => {
-    for (const query of queries) query.removeEventListener("change", onChange);
+    for (const cleanup of cleanups) cleanup();
   };
 }
 function visibleColumnCount() {
-  const matches = approvalBreakpoints.map((query) => window.matchMedia(query).matches);
+  const matches = approvalBreakpoints.map(matchesMedia);
   return 3 + Number(matches[0]) + Number(matches[1]) + 2 * Number(matches[2]) + 2 * Number(matches[3]);
 }
 function serverColumnCount() {

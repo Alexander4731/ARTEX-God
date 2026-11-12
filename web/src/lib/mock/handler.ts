@@ -2,6 +2,7 @@
 // 未命中的一律返回安全默认（[] / {} / {ok:true}），保证任何页面都不崩。
 // 只在 NEXT_PUBLIC_MOCK=1 时经由 api.ts 的 http() 短路进入这里。
 
+import { cloneJson } from "@/lib/json";
 import {
   classifyCompanyScopeLine,
   companyScopeRuleError,
@@ -39,15 +40,15 @@ const delay = (ms = 120) => new Promise((r) => setTimeout(r, ms));
 
 // Requests mutate a runtime copy, never the exported fixtures. This keeps module
 // initialization deterministic for tests/HMR while preserving state across mock calls.
-const mockInterceptHistory = structuredClone(D.interceptHistory);
-const mockInterceptPending = structuredClone(D.interceptPending);
-const mockInterceptDetails = structuredClone(D.interceptDetails);
-const mockTasks = structuredClone(D.tasks);
-const mockFindings = structuredClone(D.findings);
-const mockLLMRecords = structuredClone(D.llmRecords);
-const mockTaskTemplates = structuredClone(D.taskTemplates);
-const mockTaskCategories = structuredClone(D.taskCategories);
-const mockConversations = structuredClone(D.conversations);
+const mockInterceptHistory = cloneJson(D.interceptHistory);
+const mockInterceptPending = cloneJson(D.interceptPending);
+const mockInterceptDetails = cloneJson(D.interceptDetails);
+const mockTasks = cloneJson(D.tasks);
+const mockFindings = cloneJson(D.findings);
+const mockLLMRecords = cloneJson(D.llmRecords);
+const mockTaskTemplates = cloneJson(D.taskTemplates);
+const mockTaskCategories = cloneJson(D.taskCategories);
+const mockConversations = cloneJson(D.conversations);
 const mockRetests: FindingRetest[] = [];
 const mockRetestMessages: Record<number, Activity[]> = {};
 
@@ -201,10 +202,10 @@ function stopMockRetest(conversationID: number) {
     retest.error = "演示复测已停止";
   }
 }
-const mockIntents = structuredClone(D.intents);
-const mockCompanies = structuredClone(D.companies);
-const mockAssets = structuredClone(D.assets);
-const mockActivity = structuredClone(D.activity);
+const mockIntents = cloneJson(D.intents);
+const mockCompanies = cloneJson(D.companies);
+const mockAssets = cloneJson(D.assets);
+const mockActivity = cloneJson(D.activity);
 type MockTaskArchiveSnapshot = {
   task: Task;
   numericTaskID: number;
@@ -227,7 +228,7 @@ function mockTaskAssetSourceKey(taskID: string, assetID: number): string {
 
 function publicMockTaskArchive(archive: MockTaskArchive): TaskArchive {
   const { snapshot: _snapshot, ...item } = archive;
-  return structuredClone(item);
+  return cloneJson(item);
 }
 
 function mockArchiveTaskID(taskID: string): number {
@@ -250,7 +251,7 @@ function mockTaskArchiveBlocker(taskID: string): string | undefined {
 }
 
 function publicMockTask(task: Task): Task {
-  const item = structuredClone(task);
+  const item = cloneJson(task);
   const blocker = mockTaskArchiveBlocker(task.id);
   if (blocker) item.archive_blocked_by_task_id = blocker;
   else delete item.archive_blocked_by_task_id;
@@ -282,7 +283,7 @@ function mockArchiveTask(taskID: string): MockTaskArchive {
   const assetSources: Array<[number, MockTaskAssetSource]> = [];
   for (const assetID of assetIDs) {
     const source = mockTaskAssetSources.get(mockTaskAssetSourceKey(taskID, assetID));
-    if (source) assetSources.push([assetID, structuredClone(source)]);
+    if (source) assetSources.push([assetID, cloneJson(source)]);
   }
   const findings = mockFindings.filter((finding) => finding.task_id === taskID);
   const llmRecords = mockLLMRecords.filter((record) => record.task_id === taskID);
@@ -326,7 +327,7 @@ function mockArchiveTask(taskID: string): MockTaskArchive {
     requested_at: now,
     created_at: now,
     updated_at: now,
-    snapshot: { task: structuredClone(task), numericTaskID, assetIDs, assetSources },
+    snapshot: { task: cloneJson(task), numericTaskID, assetIDs, assetSources },
   };
   mockTaskArchives.unshift(archive);
   setTimeout(() => {
@@ -373,7 +374,7 @@ function mockRestoreArchive(archive: MockTaskArchive): void {
   }, 100);
   setTimeout(() => {
     if (archive.state !== "restoring" && archive.state !== "restore_queued") return;
-    const restored = structuredClone(archive.snapshot.task);
+    const restored = cloneJson(archive.snapshot.task);
     restored.active = false;
     restored.queued = false;
     if (!mockTasks.some((task) => task.id === restored.id)) mockTasks.push(restored);
@@ -1368,7 +1369,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       task.pinned_at = b.pinned ? (task.pinned_at ?? new Date().toISOString()) : null;
     }
     sortMockTasks();
-    return structuredClone(task);
+    return cloneJson(task);
   }
   if (seg[0] === "tasks" && seg.length === 2 && m === "DELETE") {
     const id = seg[1];
@@ -1802,7 +1803,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   }
 
   // ── companies ──
-  if (path === "/companies" && m === "GET") return structuredClone(mockCompanies);
+  if (path === "/companies" && m === "GET") return cloneJson(mockCompanies);
   if (path === "/companies" && m === "POST") {
     const name = String(b.name ?? "").trim();
     if (!name) throw new Error("企业名称不能为空");
@@ -1940,12 +1941,12 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const finding = mockFindings.find((item) => item.id === seg[2]);
     if (!finding) throw new Error("漏洞不存在");
     const findingID = D.findings.findIndex((item) => item.id === finding.id) + 1;
-    if (m === "GET") return { retests: structuredClone(mockRetests.filter((item) => item.finding_id === findingID)) };
+    if (m === "GET") return { retests: cloneJson(mockRetests.filter((item) => item.finding_id === findingID)) };
     if (m === "POST") {
       const existing = mockRetests.find(
         (item) => item.finding_id === findingID && ["pending", "running"].includes(item.status),
       );
-      if (existing) return { retest: structuredClone(existing), created: false };
+      if (existing) return { retest: cloneJson(existing), created: false };
       const now = new Date().toISOString();
       const conversationID = mockConversations.reduce((max, item) => Math.max(max, item.id), 0) + 1;
       mockConversations.unshift({
@@ -1989,7 +1990,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
           detail: "演示复测进行中（未向目标发送请求）",
         },
       ];
-      return { retest: structuredClone(retest), created: true };
+      return { retest: cloneJson(retest), created: true };
     }
   }
   if (seg[0] === "exploration" && seg[1] === "findings" && seg[3] === "deepen" && m === "POST") {
@@ -2024,7 +2025,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       if (!binding) throw new Error("证据不存在");
       const body = mockEvidenceBodies[binding.snapshot.source_traffic_id] ?? { req: "", resp: "" };
       return {
-        binding: structuredClone(binding),
+        binding: cloneJson(binding),
         request: mockEvidencePreview(body.req),
         response: mockEvidencePreview(body.resp),
       };
@@ -2295,7 +2296,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/conversations" && m === "GET") {
     sortMockConversations();
     return {
-      conversations: structuredClone(
+      conversations: cloneJson(
         mockConversations.map((conversation) => ({
           ...conversation,
           running: mockRetests.some(
@@ -2318,7 +2319,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       updated_at: now,
     };
     mockConversations.unshift(conversation);
-    return structuredClone(conversation);
+    return cloneJson(conversation);
   }
   if (seg[0] === "conversations" && seg.length === 2 && m === "PATCH") {
     const conversation = mockConversations.find((item) => item.id === Number(seg[1]));
@@ -2330,7 +2331,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     }
     conversation.updated_at = new Date().toISOString();
     sortMockConversations();
-    return structuredClone(conversation);
+    return cloneJson(conversation);
   }
   if (seg[0] === "conversations" && seg.length === 2 && m === "DELETE") {
     const id = Number(seg[1]);

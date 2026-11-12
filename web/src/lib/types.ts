@@ -1064,6 +1064,7 @@ export interface LLMProfile {
   // ""=不发送。用于按 session-id 头做提示缓存/粘性路由的网关。
   session_header_key?: string;
   client_compat?: boolean;
+  omit_thought_signatures?: boolean;
   // 本配置对重试的覆盖（建连/空响应/同 provider 安全窗口）。留空/全 0 = 跟随全局策略。
   retry?: LLMRetryOverride;
 }
