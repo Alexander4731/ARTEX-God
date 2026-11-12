@@ -435,9 +435,9 @@ var sameProviderRetryBackoff = func(attempt int) time.Duration {
 
 func requestBudgetDuration(ctx context.Context) time.Duration {
 	if deadline, ok := ctx.Deadline(); ok {
-		return time.Until(deadline)
+		return min(agent.ModelRequestTimeout, time.Until(deadline))
 	}
-	return 5 * time.Minute
+	return agent.ModelRequestTimeout
 }
 
 // sameProviderRetryPolicy 解析这次调用用哪套同 provider 重试参数:配置里设了次数就

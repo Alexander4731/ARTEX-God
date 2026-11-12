@@ -633,7 +633,7 @@ func (d *DB) SetTerminalStatusGuarded(id int64, status string) (won bool, err er
 		if err := tx.QueryRowContext(ctx, `SELECT
 EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal' AND state<>'met'),
 EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='goal'),
-EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running'))`, expID).Scan(&unmet, &goals, &active); err != nil {
+EXISTS(SELECT 1 FROM exploration_nodes WHERE exploration_id=$1 AND kind='intent' AND state IN ('open','running','paused'))`, expID).Scan(&unmet, &goals, &active); err != nil {
 			return false, err
 		}
 		if !ready || unmet || (!goals && active) {

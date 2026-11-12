@@ -7,6 +7,7 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -89,7 +90,9 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
+				discoverCtx, cancelDiscovery := context.WithTimeout(ctx, 30*time.Second)
+				ts, err := cl.Tools(discoverCtx)
+				cancelDiscovery()
 				if err != nil {
 					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
 					continue

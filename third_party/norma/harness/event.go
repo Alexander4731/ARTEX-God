@@ -6,7 +6,13 @@
 // of Events and threads context cancellation throughout.
 package harness
 
-import "github.com/Autumn-27/norma/llm"
+import (
+	"errors"
+	"github.com/Autumn-27/norma/llm"
+)
+
+// ErrEmptyResponse means bounded continuations still produced no usable answer.
+var ErrEmptyResponse = errors.New("model returned no usable response after continuation")
 
 // EventKind classifies a loop Event.
 type EventKind string

@@ -93,6 +93,9 @@ func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	cancel() // completing discovery transfers stream lifetime to the client
+	ctx, stopCalls := context.WithTimeout(t.Context(), 2*time.Second)
+	defer stopCalls()
 	tools, err := c.Tools(ctx)
 	if err != nil {
 		t.Fatal(err)

@@ -41,6 +41,8 @@ var (
 		"任务到达 timeout 后等待正在运行的 Worker 优雅收尾，但 90 秒 drain 宽限仍不足，因此执行硬取消；意图会标记为 exhausted，收尾阶段已经写入的事实和资产会保留")
 
 	// Per-work context.
+	AbortRepeatedToolFailure = cause("repeated_tool_failure", "同一工具操作反复失败，交回规划者换路",
+		"同一工具及参数已失败三次，纠偏提醒后仍重复请求。停止该意图并标记 exhausted；保留真实结果，由规划者基于新证据换路，不暂停整个任务")
 	AbortKilledByPlanner = cause("killed_by_planner", "规划者终止了这条意图",
 		"规划者调用 kill_work 主动终止了这条意图，通常表示方向跑偏或已无继续价值；意图会标记为 stopped，不会自动重新领取")
 	AbortWorkPausedByUser = cause("work_paused_by_user", "用户暂停了这条 Worker 意图",

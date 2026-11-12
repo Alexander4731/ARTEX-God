@@ -11,6 +11,9 @@ import (
 	"github.com/Autumn-27/artex/intercept"
 )
 
+// ModelRequestTimeout bounds one model request even when the task has no deadline.
+const ModelRequestTimeout = 5 * time.Minute
+
 var ErrRetryBudget = errors.New("LLM 请求重试预算已耗尽")
 
 type retryBudgetKey struct{}

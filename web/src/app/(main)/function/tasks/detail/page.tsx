@@ -241,51 +241,88 @@ function TaskDetailInner() {
     };
   }, [id]);
 
-  const taskLoadInFlight = React.useRef<string | null>(null);
-  const load = React.useCallback(() => {
-    if (taskLoadInFlight.current === id) return;
-    taskLoadInFlight.current = id;
-    Promise.all([api.task(id), api.stats(id).catch(() => null)])
-      .then(([task, s]) => {
-        if (taskLoadInFlight.current !== id) return;
+  React.useEffect(() => {
+    setTask(null);
+    setLoaded(false);
+  }, [id]);
+
+  const taskRevision = React.useRef(0);
+  const controlPending = React.useRef(false);
+  const [controlling, setControlling] = React.useState(false);
+  const [refresh, setRefresh] = React.useState(0);
+
+  React.useEffect(() => {
+    let alive = true;
+    let request: AbortController | null = null;
+    ++taskRevision.current;
+    const load = async () => {
+      if (request || controlPending.current) return;
+      const revision = taskRevision.current;
+      const controller = new AbortController();
+      request = controller;
+      // A hung request must not permanently occupy the single polling slot.
+      const timeout = setTimeout(() => controller.abort(), 15000);
+      try {
+        const [task, stats] = await Promise.all([
+          api.task(id, controller.signal),
+          api.stats(id, controller.signal).catch(() => null),
+        ]);
+        if (!alive || revision !== taskRevision.current) return;
         const base = { ...task };
-        const at = s?.active_task;
-        if (at) {
-          base.in_flight = at.in_flight;
-          base.goals_total = at.goals_total;
-          base.goals_met = at.goals_met;
-          base.engine_mode = s?.engine_mode ?? at.engine_mode;
-          base.execution_phase = at.execution_phase;
-          base.paused = at.paused;
+        const active = stats?.active_task;
+        if (active) {
+          base.in_flight = active.in_flight;
+          base.goals_total = active.goals_total;
+          base.goals_met = active.goals_met;
+          base.engine_mode = stats?.engine_mode ?? active.engine_mode;
+          base.execution_phase = active.execution_phase;
+          base.paused = active.paused;
         }
         setTask(base);
-        setPaused(at?.paused ?? base.paused ?? false);
-      })
-      .catch(() => {
-        // Keep the last rendered task state during a transient poll failure.
-      })
-      .finally(() => {
-        if (taskLoadInFlight.current === id) {
-          taskLoadInFlight.current = null;
-          setLoaded(true);
-        }
-      });
-  }, [id]);
-  React.useEffect(() => {
-    load();
+        setPaused(active?.paused ?? base.paused ?? false);
+      } catch {
+        // Preserve the last state; the next poll retries without resubmitting controls.
+      } finally {
+        clearTimeout(timeout);
+        request = null;
+        if (alive && revision === taskRevision.current) setLoaded(true);
+      }
+    };
+    void load();
     const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
-  }, [load]);
+    return () => {
+      alive = false;
+      ++taskRevision.current;
+      clearInterval(timer);
+      request?.abort();
+    };
+  }, [id, refresh]);
+
+  const reloadTask = React.useCallback(() => {
+    ++taskRevision.current;
+    setRefresh((value) => value + 1);
+  }, []);
 
   async function togglePause() {
-    if (task && ["done", "failed", "timeout"].includes(task.status)) return;
+    if (controlPending.current || !task || task.id !== id || ["done", "failed", "timeout"].includes(task.status)) return;
+    controlPending.current = true;
+    setControlling(true);
+    const revision = ++taskRevision.current;
     const next = !paused;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      await api.controlTask(id, next ? "pause" : "resume");
+      await api.controlTask(id, next ? "pause" : "resume", controller.signal);
+      if (revision !== taskRevision.current) return;
       setPaused(next);
       toast.success(next ? "已暂停探索" : "已恢复探索");
-    } catch (e) {
-      toast.error("操作失败：" + (e as Error).message);
+    } catch (error) {
+      if (revision === taskRevision.current) toast.error("操作失败：" + (error as Error).message);
+    } finally {
+      clearTimeout(timeout);
+      controlPending.current = false;
+      setControlling(false);
+      setRefresh((value) => value + 1);
     }
   }
 
@@ -367,14 +404,14 @@ function TaskDetailInner() {
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
-          <TaskEditButton task={task} onUpdated={load} />
-          <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
+          <TaskEditButton task={task} onUpdated={reloadTask} />
+          <TaskLLMControl task={task} profiles={profiles} onUpdated={reloadTask} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {!terminal && !paused && task.execution_phase && task.execution_phase !== "idle" ? (
             <span className="text-muted-foreground text-xs">
               {
                 {
-                  model: "模型响应中",
+                  model: "模型请求处理中",
                   tool: "工具执行中",
                   approval: "等待审批",
                   backoff: "等待重试",
@@ -408,7 +445,7 @@ function TaskDetailInner() {
               <TooltipContent>{archiveDisabledReason}</TooltipContent>
             </Tooltip>
           )}
-          <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal}>
+          <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal || controlling || task.id !== id}>
             {controlIcon}
             {controlLabel}
           </Button>

@@ -248,7 +248,7 @@ export const api = {
   // ---- tasks ----
   tasks: () =>
     get<{ tasks: Task[]; active: string }>("/tasks").then((r) => ({ tasks: arr(r.tasks), active: r.active ?? "" })),
-  task: (id: string) => get<Task>(`/tasks/${encodeURIComponent(id)}`),
+  task: (id: string, signal?: AbortSignal) => http<Task>(`/tasks/${encodeURIComponent(id)}`, { signal }),
   createTask: (input: {
     name?: string;
     categoryId?: number;
@@ -317,8 +317,10 @@ export const api = {
       active_llm_profile_id: activeLLMProfileId ?? null,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
-  controlTask: (id: string, action: "pause" | "resume") =>
-    post<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, { action }),
+  controlTask: (id: string, action: "pause" | "resume", signal?: AbortSignal) =>
+    http<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, {
+      method: "POST", body: JSON.stringify({ action }), signal,
+    }),
   controlTasksBatch: (taskIds: string[], action: "pause" | "resume") =>
     post<{ items: BatchControlItem[] }>("/tasks/control/batch", { task_ids: taskIds, action }),
   taskArchives: (input?: { page?: number; size?: number; q?: string; state?: string }) => {
@@ -370,7 +372,7 @@ export const api = {
   rerunBlocked: (taskId: string) => post<{ id: string; reopened: number }>(`/tasks/${taskId}/intents/rerun-blocked`),
   setActive: (id: string) => post<{ active: string }>("/active", { id }),
   // ---- stats ----
-  stats: (task?: string) => get<Stats>(`/stats${tq(task)}`),
+  stats: (task?: string, signal?: AbortSignal) => http<Stats>(`/stats${tq(task)}`, { signal }),
   // 资产测试覆盖度(粗估，供参考)：范围内资产被 fact 碰过的占比 + 按类型的 总数/已测。
   taskCoverage: (id: string) =>
     get<{

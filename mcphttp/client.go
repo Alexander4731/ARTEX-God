@@ -14,7 +14,6 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -68,16 +67,16 @@ type Client struct {
 	sessionID string
 
 	// legacySSE is the pre-2025 MCP SSE transport used by servers such as GSL5.
-	legacySSE    bool
-	messageURL   string
-	streamBody   io.ReadCloser
-	streamCancel context.CancelFunc
-	streamDone   chan struct{}
-	legacyMu     sync.Mutex
-	pendingMu    sync.Mutex
-	pending      map[int]chan *rpcResponse
-	streamErr    chan error
-	protocol     string
+	legacySSE     bool
+	messageURL    string
+	streamBody    io.ReadCloser
+	streamCancel  context.CancelFunc
+	streamContext context.Context
+	streamDone    chan struct{}
+	pendingMu     sync.Mutex
+	pending       map[int]chan *rpcResponse
+	streamErr     error // written before streamDone closes
+	protocol      string
 }
 
 func normalizeHeaders(headers map[string]string) (map[string]string, error) {
@@ -131,6 +130,10 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
+	// The long-lived stream outlives the discovery context only after a complete
+	// handshake. Until then cancellation must interrupt headers and endpoint reads.
+	stopHandshake := context.AfterFunc(ctx, cancel)
+	defer stopHandshake()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		cancel()
@@ -158,23 +161,27 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		return nil, err
 	}
 	c := &Client{
-		server:       server,
-		url:          sseURL,
-		headers:      cleanHeaders,
-		http:         hc,
-		legacySSE:    true,
-		messageURL:   endpoint,
-		streamBody:   resp.Body,
-		streamCancel: cancel,
-		streamDone:   make(chan struct{}),
-		pending:      make(map[int]chan *rpcResponse),
-		streamErr:    make(chan error, 1),
-		protocol:     legacySSEProtocolVersion,
+		server:        server,
+		url:           sseURL,
+		headers:       cleanHeaders,
+		http:          hc,
+		legacySSE:     true,
+		messageURL:    endpoint,
+		streamBody:    resp.Body,
+		streamCancel:  cancel,
+		streamContext: streamCtx,
+		streamDone:    make(chan struct{}),
+		pending:       make(map[int]chan *rpcResponse),
+		protocol:      legacySSEProtocolVersion,
 	}
 	go c.readLegacySSE(reader)
 	if err := c.initialize(ctx); err != nil {
 		_ = c.Close()
 		return nil, err
+	}
+	if !stopHandshake() {
+		_ = c.Close()
+		return nil, ctx.Err()
 	}
 	return c, nil
 }
@@ -209,16 +216,12 @@ func readSSEEndpoint(r *bufio.Reader, base string) (string, error) {
 }
 
 func (c *Client) readLegacySSE(r *bufio.Reader) {
+	defer c.streamCancel()
 	defer close(c.streamDone)
 	for {
 		line, err := r.ReadString('\n')
 		if err != nil {
-			if !errors.Is(err, context.Canceled) {
-				select {
-				case c.streamErr <- err:
-				default:
-				}
-			}
+			c.streamErr = err
 			return
 		}
 		line = strings.TrimRight(line, "\r\n")
@@ -374,7 +377,9 @@ func (c *Client) Close() error {
 	if sid == "" {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodDelete, c.url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil)
 	if err != nil {
 		return nil
 	}
@@ -479,10 +484,24 @@ func (c *Client) roundTrip(ctx context.Context, body rpcRequest, expectResp bool
 // legacyRoundTrip posts to the endpoint announced by GET /sse. The HTTP POST
 // only acknowledges receipt; the JSON-RPC response arrives on the SSE stream.
 func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectResp bool) (*rpcResponse, error) {
-	// Serializing calls keeps the first implementation deterministic while the
-	// shared SSE reader still handles asynchronous delivery.
-	c.legacyMu.Lock()
-	defer c.legacyMu.Unlock()
+	// A disconnected response stream also interrupts an in-flight POST. Never
+	// leave a tool waiting on an acknowledgement that can no longer be paired.
+	if c.streamContext != nil {
+		requestCtx, cancel := context.WithCancel(ctx)
+		stop := context.AfterFunc(c.streamContext, cancel)
+		defer stop()
+		defer cancel()
+		ctx = requestCtx
+	}
+	// IDs already correlate concurrent requests. A mutex here would make a
+	// canceled caller wait behind an unrelated long-running tool.
+	select {
+	case <-c.streamDone:
+		return nil, fmt.Errorf("mcp sse stream closed: %w", c.streamErr)
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
 
 	data, err := json.Marshal(body)
 	if err != nil {
@@ -523,10 +542,23 @@ func (c *Client) legacyRoundTrip(ctx context.Context, body rpcRequest, expectRes
 	select {
 	case response := <-responseCh:
 		return response, nil
-	case err := <-c.streamErr:
-		return nil, fmt.Errorf("mcp sse stream: %w", err)
+	case <-c.streamDone:
+		// A final response and EOF can arrive together. Prefer the known result.
+		select {
+		case response := <-responseCh:
+			return response, nil
+		default:
+			return nil, fmt.Errorf("mcp sse stream closed: %w", c.streamErr)
+		}
 	case <-ctx.Done():
-		return nil, ctx.Err()
+		// Closing the response stream cancels the POST context as well; retain
+		// any matching response that arrived before that cancellation.
+		select {
+		case response := <-responseCh:
+			return response, nil
+		default:
+			return nil, ctx.Err()
+		}
 	}
 }
 

@@ -540,8 +540,9 @@ func (e *Engine) drainSteer(intentID int64) (string, bool) {
 // of running the tool. No queued message → the guard behaves exactly as before.
 // 它同时负责「空转回合」的续跑，见 Stop。
 type steerHooks struct {
-	inner harness.HookRunner
-	drain func() (string, bool)
+	inner    harness.HookRunner
+	drain    func() (string, bool)
+	failures *workerFailureGuard
 	// nudges 是本条意图已注入的空转续跑次数，上限 limit。指针:harness 持有的是
 	// steerHooks 的值拷贝，计数必须共享同一份。
 	nudges *atomic.Int64
@@ -587,9 +588,16 @@ func isThinkingOnlyTurn(messages []llm.Message) bool {
 }
 
 func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (bool, string, []byte) {
-	if msg, ok := h.drain(); ok {
-		return true, "【规划者实时纠偏】" + msg +
-			"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
+	if h.drain != nil {
+		if msg, ok := h.drain(); ok {
+			return true, "【规划者实时纠偏】" + msg +
+				"\n（这是规划者对本意图的即时指令；本次工具调用未执行，请据此调整下一步。若与你当前打算冲突，以此为准。）", nil
+		}
+	}
+	if h.failures != nil {
+		if blocked, reason := h.failures.before(name, input); blocked {
+			return true, reason, nil
+		}
 	}
 	if h.inner != nil {
 		return h.inner.PreToolUse(ctx, name, input)
@@ -598,6 +606,9 @@ func (h steerHooks) PreToolUse(ctx context.Context, name string, input []byte) (
 }
 
 func (h steerHooks) PostToolUse(ctx context.Context, name string, input, result []byte, isErr bool) {
+	if h.failures != nil {
+		h.failures.after(name, input, isErr)
+	}
 	if h.inner != nil {
 		h.inner.PostToolUse(ctx, name, input, result, isErr)
 	}
@@ -818,10 +829,20 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	defer heartbeat.Stop()
 	nextRound := interval
 	failures, emptyRounds := 0, 0
+	var retryAt time.Time
+	endBackoff := func() {}
+	defer func() { endBackoff() }()
 
 	// runRound 跑一轮规划(含 debounce 合并 + 各 guard)。src 仅用于日志区分触发来源。
 	runRound := func(src string) {
 		nextRound = interval
+		if wait := time.Until(retryAt); wait > 0 && !e.IsPaused(t.ID) {
+			nextRound = wait // notifications cannot bypass the provider cooldown
+			return
+		}
+		endBackoff()
+		endBackoff = func() {}
+		retryAt = time.Time{}
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
 	drain:
@@ -837,7 +858,8 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		}
 		planner, _ := e.snapshotFor(t)
 		if planner == nil {
-			return // idle until LLM configured
+			nextRound = 2 * time.Second
+			return // recheck readiness without waiting the ten-minute heartbeat
 		}
 		if e.IsPaused(t.ID) {
 			failures, emptyRounds = 0, 0
@@ -863,7 +885,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		// 整段纯 Go、不触发任何 LLM 调用，也不打规划轮 marker。
 		if open, err := t.Store.HasOpenGoal(); err == nil && !open {
 			t.drainTriggers() // 丢弃累积的 done/finding 触发，避免 goalless 长会话里无界增长
-			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
+			if active, err := t.Store.HasPendingIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
 				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
@@ -904,12 +926,19 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		switch {
 		case err != nil && ectx.Err() == nil:
 			log.Printf("[planner] task %s 规划出错: %v", t.ID, err)
-			failures++
-			if failures < 3 && isRetryableStreamError(err) {
-				nextRound = time.Duration(failures*2) * time.Second
+			failures = min(failures+1, 6)
+			if retryablePlannerModelError(err) {
+				nextRound = plannerModelBackoff(failures)
+				retryAt = time.Now().Add(nextRound)
+				endBackoff = intercept.BeginPhase(ectx, "backoff")
+				e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
+					Summary: fmt.Sprintf("规划模型暂时不可用，%s 后自动重试；现有执行和恢复继续运行", nextRound)})
 			} else {
 				e.pauseForInput(t, "规划无法继续，请检查模型配置或补充任务信息: "+err.Error())
 			}
+		case ectx.Err() != nil:
+			failures, emptyRounds = 0, 0
+			return
 		case met:
 			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
 			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
@@ -932,7 +961,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			log.Printf("[planner] task %s 规划完成", t.ID)
 			failures = 0
 			after, progressErr := t.Store.GraphProgress()
-			active, activeErr := t.Store.HasActiveIntent()
+			active, activeErr := t.Store.HasPendingIntent()
 			if progressErr != nil || activeErr != nil {
 				nextRound = 5 * time.Second
 				return
@@ -1037,7 +1066,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
 	emit := func(r db.Activity) { e.emitActivity(t, r) }
-	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false) // cancellable by Pause; 带任务 deadline
+	ectx := e.clockCtx(e.execContextFor(ctx, t.ID), t, false)
+	ectx = agent.WithTaskObjective(ectx, t.lifecycleSnapshot().Goal) // cancellable by Pause; 带任务 deadline
 	if ectx.Err() != nil || e.IsDeleting(t.ID) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 领取后回退失败: %v", name, t.ID, intent.ID, err)
@@ -1062,11 +1092,12 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
-		inner:  t.Guard.Hooks(),
-		drain:  func() (string, bool) { return e.drainSteer(iid) },
-		nudges: &atomic.Int64{},
-		limit:  e.emptyTurnNudgeLimit(),
-		label:  label,
+		inner:    t.Guard.Hooks(),
+		failures: newWorkerFailureGuard(workCancel),
+		drain:    func() (string, bool) { return e.drainSteer(iid) },
+		nudges:   &atomic.Int64{},
+		limit:    e.emptyTurnNudgeLimit(),
+		label:    label,
 	}
 	wTaskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	var reason harness.TerminalReason
@@ -1101,7 +1132,8 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// unregister would always be true (unregister cancels it) → every completed
 	// work would be wrongly marked stopped.
 	workCause := context.Cause(workCtx)
-	killed := workCtx.Err() != nil && ectx.Err() == nil
+	noProgress := errors.Is(workCause, agent.AbortRepeatedToolFailure)
+	killed := workCtx.Err() != nil && ectx.Err() == nil && !noProgress
 	action, completeWork := e.detachWork(intent.ID)
 	// A caller may stop waiting and release its in-memory reservation before the
 	// agent honors cancellation. The named context cause remains authoritative and
@@ -1124,7 +1156,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		state = "exhausted"
 	case killed || (ectx.Err() != nil && isTerminalStatus(e.m.TaskStatus(t.ID))):
 		state = "stopped"
-	case errors.Is(workCause, agent.AbortRunHardTimeout), reason == harness.ReasonTimeout, reason == harness.ReasonMaxTurns:
+	case noProgress, errors.Is(workCause, agent.AbortRunHardTimeout), reason == harness.ReasonTimeout, reason == harness.ReasonMaxTurns:
 		state = "exhausted"
 	case err != nil:
 		state = "blocked"

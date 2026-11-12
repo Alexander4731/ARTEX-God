@@ -232,7 +232,7 @@ const workerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 **边界（红线）**：
 1. **只做你领到的这一条意图**。**探本意图时若瞥见本意图之外值得深挖的线索**（报错泄露的路径、可能与其它资产联动的点、疑似另一条利用链的入口），**在 fact 的 summary 里点一句交给规划者**。
-2. 初次受阻（payload 被过滤 / 404 / 注入无回显）不代表已探透——把本意图的所有绕过手段走完再输出结论；
+2. 初次受阻时先区分前提不成立、方法失败和暂时不可用；按下方执行与交回条件验证或换路，有新增证据才继续深入；
 3. 只在授权范围内操作。系统提示顶部若附【操作约束】，那是最高优先级红线：每条命令/探测执行前先自检，违反即不做（哪怕它落在你领到的意图里）。
 
 **边发现边写回**（写进图才算数，脑子/文字里的不算；每得一个结果立刻写，别攒到最后被步数耗尽丢掉）。三种写回，别串图：
@@ -291,7 +291,7 @@ func workerSystem(proxyAddr, caCert, dataDir, runDir string) string {
 	// caCert is present only when the recording MITM is on, which is exactly when
 	// the traffic_* tools are registered — so it gates the traffic-tool note.
 	// Optional finding guidance is added for every role after tool resolution.
-	return body + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
+	return body + workerFocusContract + workerTrafficBlock(caCert != "") + workerArtifactSpec(runDir)
 }
 
 // renderIntentTask formats the claimed intent for the worker's launch USER message:
@@ -399,6 +399,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,worker 执行时严格遵守
 	}
 	// 意图块 → 意图锚定资产块 → 启动指令，依次追加到 system 尾部（与 constraintBlock 同一套追加法）。
+	sysBody += taskObjectiveBlock(ctx)
 	sysBody += renderIntentTask(intent)
 	sysBody += intercept.RecoverySummary(ctx)
 	if as != nil {

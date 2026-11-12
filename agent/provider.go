@@ -439,7 +439,7 @@ func quotaAwareHTTPClient(c Config) (*http.Client, error) {
 		}
 		transport.Proxy = http.ProxyURL(proxyURL)
 	}
-	return &http.Client{Transport: quotaAwareTransport{
+	return &http.Client{Timeout: ModelRequestTimeout, Transport: quotaAwareTransport{
 		base: transport, sessionHeaderKey: strings.TrimSpace(c.SessionHeaderKey),
 		clientCompat: c.ClientCompat, format: c.Format,
 		pacer: newRequestPacer(c.RatePerSecond, c.RatePerMinute),

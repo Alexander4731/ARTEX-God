@@ -500,6 +500,12 @@ func (l *loop) run() {
 				l.lastContinue = ContinueTokenBudget
 				continue
 			}
+			// A thinking-only/empty answer after the bounded Stop continuation is
+			// a model failure, not a successfully completed unit of work.
+			if strings.TrimSpace(asst.Text()) == "" {
+				l.finish(ReasonModelError, ErrEmptyResponse, "")
+				return
+			}
 			l.finish(ReasonCompleted, nil, asst.Text())
 			return
 		}

@@ -22,6 +22,8 @@ type mcpClient interface {
 
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
 	switch m.Transport {
 	case "stdio":
 		if m.Command == "" {
