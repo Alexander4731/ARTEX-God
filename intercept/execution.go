@@ -103,7 +103,10 @@ func (t *Trace) bindExecution(d *db.DB, id int64, a db.InterceptAudit, toolName 
 					log.Printf("[execution] output directory %d unavailable, retaining database receipt: %v", id, err)
 				} else {
 					destination := filepath.Join(dir, "process-output.txt")
-					if err := copyExecutionOutput(event.OutputPath, destination); err != nil {
+					stored, total, err := snapshotExecutionOutput(event.OutputPath, destination, 51<<20)
+					complete := err == nil && stored == total
+					event.OutputBytes, event.OutputStoredBytes, event.OutputComplete = total, stored, &complete
+					if err != nil {
 						log.Printf("[execution] output snapshot %d: %v", id, err)
 					} else {
 						event.OutputPath = destination
@@ -170,30 +173,36 @@ func writeReceiptFile(path string, raw []byte) error {
 	return os.Rename(name, path)
 }
 
-func copyExecutionOutput(src, dst string) error {
+func snapshotExecutionOutput(src, dst string, limit int64) (stored, total int64, err error) {
 	f, err := os.Open(src)
 	if err != nil {
-		return err
+		return stored, total, err
 	}
 	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return 0, 0, err
+	}
+	total = info.Size()
 	out, err := os.CreateTemp(filepath.Dir(dst), "output-*.tmp")
 	if err != nil {
-		return err
+		return stored, total, err
 	}
 	defer os.Remove(out.Name())
-	_, err = io.Copy(out, io.LimitReader(f, 51<<20))
+	stored, err = io.Copy(out, io.LimitReader(f, limit))
 	if err != nil {
 		out.Close()
-		return err
+		return stored, total, err
 	}
 	if err = out.Sync(); err != nil {
 		out.Close()
-		return err
+		return stored, total, err
 	}
 	if err = out.Close(); err != nil {
-		return err
+		return stored, total, err
 	}
-	return os.Rename(out.Name(), dst)
+	err = os.Rename(out.Name(), dst)
+	return stored, total, err
 }
 
 // ReplayExecutionReceipts only reads host-owned receipt envelopes and requires

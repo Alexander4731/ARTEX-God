@@ -146,6 +146,14 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req CompletionRequ
 			return
 		}
 		defer resp.Body.Close()
+		var attemptUsage Usage
+		var attemptErr error
+		defer func() {
+			if attemptErr == nil {
+				attemptErr = ctx.Err()
+			}
+			reportAttempt(ctx, attemptUsage, attemptErr)
+		}()
 		scan := newSSEScanner(resp.Body)
 		for {
 			event, data, serr := scan.next()
@@ -153,6 +161,7 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req CompletionRequ
 				return
 			}
 			if serr != nil {
+				attemptErr = serr
 				yield(StreamEvent{}, serr)
 				return
 			}
@@ -161,12 +170,14 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req CompletionRequ
 			}
 			ev, ok, perr := parseResponsesFrame(event, data)
 			if perr != nil {
+				attemptErr = perr
 				yield(StreamEvent{}, perr)
 				return
 			}
 			if !ok {
 				continue
 			}
+			ev.FoldUsage(&attemptUsage)
 			if !yield(ev, nil) {
 				return
 			}
@@ -232,6 +243,7 @@ func parseResponsesFrame(event, data string) (StreamEvent, bool, error) {
 		}
 		if f.Response.Usage != nil {
 			ev.Usage = f.Response.Usage.norm()
+			ev.CumulativeUsage = true
 		}
 		return ev, true, nil
 	case "response.failed", "error":
@@ -261,9 +273,12 @@ func (p *openaiResponsesProvider) Complete(ctx context.Context, req CompletionRe
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
+		reportAttempt(ctx, Usage{}, err)
 		return Message{}, "", Usage{}, err
 	}
-	return parseResponsesResponse(raw)
+	msg, stop, usage, parseErr := parseResponsesResponse(raw)
+	reportAttempt(ctx, usage, parseErr)
+	return msg, stop, usage, parseErr
 }
 
 type orUsage struct {

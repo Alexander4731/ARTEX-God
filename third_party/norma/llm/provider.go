@@ -22,6 +22,7 @@ const (
 	SEThinkingSignature StreamEventType = "thinking_signature"
 	SEToolUseStart      StreamEventType = "tool_use_start"
 	SEToolInputJSON     StreamEventType = "tool_input_delta"
+	SEToolUseSignature  StreamEventType = "tool_use_signature"
 	SEMessageDelta      StreamEventType = "message_delta" // carries stop_reason / usage
 	SEMessageStop       StreamEventType = "message_stop"
 )
@@ -34,6 +35,11 @@ type StreamEvent struct {
 	ToolName   string // tool_use_start
 	StopReason string // message_delta
 	Usage      Usage  // message_start / message_delta
+	// Indexed tool events can interleave; absent indices retain sequential protocol behavior.
+	ToolIndex    int
+	ToolIndexSet bool
+	// CumulativeUsage distinguishes protocol snapshots from host-provided deltas.
+	CumulativeUsage bool
 }
 
 // Format selects the wire protocol of a Provider.
@@ -105,7 +111,8 @@ type Config struct {
 	// take the old one, hence the opt-in default. Exactly one key is ever sent.
 	// Ignored by the Anthropic and Responses formats, which name the field
 	// themselves ("max_tokens" / "max_output_tokens").
-	MaxTokensField string
+	OmitThoughtSignatures bool // Explicit capability for gateways rejecting vendor tool extensions.
+	MaxTokensField        string
 
 	limiter *rateLimiter // built from RateLimit by NewProvider; shared via the provider
 }
@@ -186,7 +193,7 @@ func NewProvider(cfg Config) (Provider, error) {
 		if cfg.APIVersion == "" {
 			cfg.APIVersion = "2023-06-01"
 		}
-		return &anthropicProvider{cfg: cfg}, nil
+		return &thinkingFallbackProvider{inner: &anthropicProvider{cfg: cfg}, cfg: cfg}, nil
 	case FormatOpenAI:
 		if cfg.APIKey == "" {
 			cfg.APIKey = os.Getenv("OPENAI_API_KEY")
@@ -194,7 +201,7 @@ func NewProvider(cfg Config) (Provider, error) {
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = envOr("OPENAI_BASE_URL", "https://api.openai.com/v1")
 		}
-		return &openaiProvider{cfg: cfg}, nil
+		return &thinkingFallbackProvider{inner: &openaiProvider{cfg: cfg}, cfg: cfg}, nil
 	case FormatOpenAIResponses:
 		if cfg.APIKey == "" {
 			cfg.APIKey = os.Getenv("OPENAI_API_KEY")
@@ -202,7 +209,7 @@ func NewProvider(cfg Config) (Provider, error) {
 		if cfg.BaseURL == "" {
 			cfg.BaseURL = envOr("OPENAI_BASE_URL", "https://api.openai.com/v1")
 		}
-		return &openaiResponsesProvider{cfg: cfg}, nil
+		return &thinkingFallbackProvider{inner: &openaiResponsesProvider{cfg: cfg}, cfg: cfg}, nil
 	default:
 		return nil, fmt.Errorf("llm: unknown format %q (use anthropic, openai or openai-responses)", cfg.Format)
 	}

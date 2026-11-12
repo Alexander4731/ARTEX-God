@@ -3,7 +3,6 @@ package llm
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -24,6 +23,13 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 	if err := cfg.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}
+	if cfg.HTTPClient == nil {
+		client, err := defaultHTTPClient(cfg.Proxy)
+		if err != nil {
+			return nil, err
+		}
+		cfg.HTTPClient = client
+	}
 	retries := cfg.retries()
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
@@ -37,6 +43,11 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 			return resp, nil
 		}
 
+		attemptErr := err
+		if attemptErr == nil {
+			attemptErr = &HTTPStatusError{Provider: errPrefix, Status: resp.StatusCode}
+		}
+		reportAttempt(ctx, Usage{}, attemptErr)
 		retryable := false
 		switch {
 		case err != nil:
@@ -48,9 +59,9 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 			if err != nil {
 				return nil, err
 			}
-			data, _ := io.ReadAll(resp.Body)
+			data, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 			resp.Body.Close()
-			return nil, fmt.Errorf("%s: status %d: %s", errPrefix, resp.StatusCode, strings.TrimSpace(string(data)))
+			return nil, &HTTPStatusError{Provider: errPrefix, Status: resp.StatusCode, Body: strings.TrimSpace(string(data))}
 		}
 		if resp != nil {
 			resp.Body.Close()

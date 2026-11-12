@@ -12,6 +12,8 @@ import (
 type Accumulator struct {
 	blocks     []ContentBlock
 	toolInputs []*strings.Builder
+	toolSigs   []string
+	toolPos    map[int]int
 	textBuf    *strings.Builder
 	thinkBuf   *strings.Builder
 	thinkSig   string // signature for the current thinking block
@@ -26,7 +28,7 @@ func NewAccumulator() *Accumulator { return &Accumulator{} }
 func (a *Accumulator) Add(ev StreamEvent) {
 	switch ev.Type {
 	case SEMessageStart:
-		a.Usage.Add(ev.Usage)
+		ev.FoldUsage(&a.Usage)
 	case SETextDelta:
 		if a.textBuf == nil {
 			a.flushThinking()
@@ -46,15 +48,26 @@ func (a *Accumulator) Add(ev StreamEvent) {
 		a.flushThinking()
 		a.blocks = append(a.blocks, ContentBlock{Type: BlockToolUse, ID: ev.ToolID, Name: ev.ToolName})
 		a.toolInputs = append(a.toolInputs, &strings.Builder{})
+		a.toolSigs = append(a.toolSigs, "")
+		if ev.ToolIndexSet {
+			if a.toolPos == nil {
+				a.toolPos = make(map[int]int)
+			}
+			a.toolPos[ev.ToolIndex] = len(a.toolInputs) - 1
+		}
 	case SEToolInputJSON:
-		if n := len(a.toolInputs); n > 0 {
-			a.toolInputs[n-1].WriteString(ev.Text)
+		if pos, ok := a.toolPosition(ev); ok {
+			a.toolInputs[pos].WriteString(ev.Text)
+		}
+	case SEToolUseSignature:
+		if pos, ok := a.toolPosition(ev); ok {
+			a.toolSigs[pos] = ev.Text
 		}
 	case SEMessageDelta:
 		if ev.StopReason != "" {
 			a.StopReason = ev.StopReason
 		}
-		a.Usage.Add(ev.Usage)
+		ev.FoldUsage(&a.Usage)
 	case SEMessageStop:
 		a.flushText()
 		a.flushThinking()
@@ -94,6 +107,7 @@ func (a *Accumulator) Message() Message {
 	for i, b := range a.blocks {
 		if b.Type == BlockToolUse {
 			raw := strings.TrimSpace(a.toolInputs[ti].String())
+			b.ThoughtSignature = a.toolSigs[ti]
 			ti++
 			if raw == "" || !json.Valid([]byte(raw)) {
 				raw = "{}"
@@ -103,4 +117,12 @@ func (a *Accumulator) Message() Message {
 		out[i] = b
 	}
 	return Message{Role: RoleAssistant, Content: out}
+}
+
+func (a *Accumulator) toolPosition(ev StreamEvent) (int, bool) {
+	if ev.ToolIndexSet {
+		pos, ok := a.toolPos[ev.ToolIndex]
+		return pos, ok
+	}
+	return len(a.toolInputs) - 1, len(a.toolInputs) > 0
 }

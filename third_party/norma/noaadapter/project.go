@@ -241,6 +241,7 @@ func rebuildBlock(b llm.ContentBlock, c noa.CoreMessage, sc *Sidecar, opts Reass
 		// Writing a malformed payload back would break the call itself.
 		if c.Text != string(b.Input) && json.Valid([]byte(c.Text)) {
 			b.Input = json.RawMessage(c.Text)
+			b.ThoughtSignature = "" // Rewritten arguments cannot retain the original signature.
 		}
 
 	case llm.BlockToolResult:

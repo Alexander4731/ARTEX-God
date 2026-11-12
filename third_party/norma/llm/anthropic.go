@@ -57,7 +57,7 @@ func (p *anthropicProvider) buildBody(req CompletionRequest, stream bool) ([]byt
 	// only when thinking is actively "enabled"; any other mode (incl. "disabled")
 	// strips them so Anthropic does not reject the request.
 	thinkingType := p.cfg.ThinkingType
-	thinkingEnabled := thinkingType != ""
+	thinkingEnabled := thinkingType == "enabled" || thinkingType == "adaptive"
 	if req.Thinking != "" {
 		thinkingType = req.Thinking
 		thinkingEnabled = req.Thinking == "enabled"
@@ -123,6 +123,14 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 			return
 		}
 		defer resp.Body.Close()
+		var attemptUsage Usage
+		var attemptErr error
+		defer func() {
+			if attemptErr == nil {
+				attemptErr = ctx.Err()
+			}
+			reportAttempt(ctx, attemptUsage, attemptErr)
+		}()
 		scan := newSSEScanner(resp.Body)
 		for {
 			_, data, serr := scan.next()
@@ -130,6 +138,7 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 				return
 			}
 			if serr != nil {
+				attemptErr = serr
 				yield(StreamEvent{}, serr)
 				return
 			}
@@ -138,12 +147,14 @@ func (p *anthropicProvider) Stream(ctx context.Context, req CompletionRequest) i
 			}
 			ev, ok, perr := parseAnthropicFrame(data)
 			if perr != nil {
+				attemptErr = perr
 				yield(StreamEvent{}, perr)
 				return
 			}
 			if !ok {
 				continue
 			}
+			ev.FoldUsage(&attemptUsage)
 			if !yield(ev, nil) {
 				return
 			}
@@ -171,9 +182,12 @@ func (p *anthropicProvider) Complete(ctx context.Context, req CompletionRequest)
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {
+		reportAttempt(ctx, Usage{}, err)
 		return Message{}, "", Usage{}, err
 	}
-	return parseAnthropicResponse(raw)
+	msg, stop, usage, parseErr := parseAnthropicResponse(raw)
+	reportAttempt(ctx, usage, parseErr)
+	return msg, stop, usage, parseErr
 }
 
 // parseAnthropicResponse decodes a non-streaming Messages API response into the
@@ -262,14 +276,11 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 	switch f.Type {
 	case "message_start":
 		if f.Message.Usage != nil {
-			// Anthropic reports the full input side (input + cache read/creation) in
-			// BOTH message_start and message_delta. To avoid double-counting when the
-			// accumulator folds both events, message_start carries ONLY the input side
-			// and message_delta carries ONLY output. The initial output_tokens here is
-			// a placeholder (≈1), so drop it — the real output comes from message_delta.
+			// Usage is cumulative; retain both reports and fold snapshots by field.
+			// Initial output is a placeholder; the final count arrives in deltas.
 			u := f.Message.Usage.norm()
 			u.OutputTokens = 0
-			return StreamEvent{Type: SEMessageStart, Usage: u}, true, nil
+			return StreamEvent{Type: SEMessageStart, Usage: u, CumulativeUsage: true}, true, nil
 		}
 	case "content_block_start":
 		if f.ContentBlock.Type == "tool_use" {
@@ -287,12 +298,9 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 			return StreamEvent{Type: SEToolInputJSON, Text: f.Delta.PartialJSON}, true, nil
 		}
 	case "message_delta":
-		ev := StreamEvent{Type: SEMessageDelta, StopReason: f.Delta.StopReason}
+		ev := StreamEvent{Type: SEMessageDelta, StopReason: f.Delta.StopReason, CumulativeUsage: true}
 		if f.Usage != nil {
-			// Only output here — the input side (input/cache) was already counted at
-			// message_start; message_delta re-echoes it, so counting it again would
-			// double the input/cache totals.
-			ev.Usage = Usage{OutputTokens: f.Usage.OutputTokens}
+			ev.Usage = f.Usage.norm()
 		}
 		return ev, true, nil
 	case "message_stop":
@@ -353,13 +361,43 @@ func filterThinkingBlocks(msgs []Message, thinkingEnabled bool) []Message {
 		if len(content) == 0 {
 			continue // empty content array is rejected by Anthropic — drop it
 		}
-		if len(content) == len(m.Content) {
+		content = stripThoughtSignatures(content)
+		if len(content) == len(m.Content) && sameBacking(content, m.Content) {
 			out = append(out, m)
 		} else {
 			out = append(out, Message{Role: m.Role, Content: content})
 		}
 	}
 	return out
+}
+
+// stripThoughtSignatures clears ThoughtSignature on every block, copying only
+// when at least one is set so untouched history keeps sharing its backing array.
+// Callers own the returned slice; the input is never mutated — it belongs to the
+// caller's conversation state and must survive the request unchanged.
+func stripThoughtSignatures(content []ContentBlock) []ContentBlock {
+	idx := -1
+	for i, b := range content {
+		if b.ThoughtSignature != "" {
+			idx = i
+			break
+		}
+	}
+	if idx < 0 {
+		return content
+	}
+	out := make([]ContentBlock, len(content))
+	copy(out, content)
+	for i := idx; i < len(out); i++ {
+		out[i].ThoughtSignature = ""
+	}
+	return out
+}
+
+// sameBacking reports whether two slices share their first element's address,
+// i.e. whether a normalization step above returned the input untouched.
+func sameBacking(a, b []ContentBlock) bool {
+	return len(a) == 0 || len(b) == 0 || &a[0] == &b[0]
 }
 
 // mergeAdjacentSameRole coalesces consecutive same-role messages into one by

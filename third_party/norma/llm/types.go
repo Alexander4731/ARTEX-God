@@ -46,6 +46,9 @@ type ContentBlock struct {
 	Name  string          `json:"name,omitempty"`
 	Input json.RawMessage `json:"input,omitempty"`
 
+	// ThoughtSignature is an opaque provider token, persisted with the original tool call.
+	ThoughtSignature string `json:"thought_signature,omitempty"`
+
 	// ToolResult: the outcome of a tool, fed back to the model.
 	ToolUseID string         `json:"tool_use_id,omitempty"`
 	Content   []ContentBlock `json:"content,omitempty"`

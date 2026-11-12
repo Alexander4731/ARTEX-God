@@ -796,6 +796,7 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	exec = newStreamExec(l)
 	acc := llm.NewAccumulator()
 
+	var indexedTools bool
 	var building bool
 	var curID, curName string
 	var curInput strings.Builder
@@ -821,6 +822,17 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		if e != nil {
 			err = e
 			break
+		}
+		// Chat Completions has interleaved indices but no per-call completion
+		// boundary. Dispatch only after the full successful stream is assembled.
+		if ev.ToolIndexSet {
+			indexedTools = true
+			acc.Add(ev)
+			continue
+		}
+		if ev.Type == llm.SEToolUseSignature {
+			acc.Add(ev)
+			continue
 		}
 		if ev.Type == llm.SEToolInputJSON {
 			if building {
@@ -854,6 +866,20 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	stopReason = acc.StopReason
 	if err != nil {
 		return asst, exec, stopReason, err, false, false
+	}
+	if indexedTools {
+		for _, block := range asst.Content {
+			if block.Type != llm.BlockToolUse {
+				continue
+			}
+			if !l.emit(Event{Kind: KindToolUse, ToolUse: &block}) {
+				return asst, exec, stopReason, nil, true, false
+			}
+			exec.add(block)
+			if !exec.drain() {
+				return asst, exec, stopReason, nil, true, false
+			}
+		}
 	}
 	// Drain tools to completion (or synthesize on abort).
 	cs, ab := exec.finish()

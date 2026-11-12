@@ -2,7 +2,7 @@ module github.com/Autumn-27/artex
 
 go 1.26.3
 
-// Pinned norma v0.4.3 with durable execution lifecycle instrumentation.
+// Pinned norma v0.4.3 with durable execution instrumentation and selected v0.4.4 protocol/output improvements.
 replace github.com/Autumn-27/norma => ./third_party/norma
 
 require (
