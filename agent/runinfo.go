@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"github.com/Autumn-27/artex/llmrec"
+	"strconv"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -35,6 +37,10 @@ type runInfoKey struct{}
 
 // WithRunInfo attaches run attribution to ctx.
 func WithRunInfo(ctx context.Context, ri RunInfo) context.Context {
+	ctx = llmrec.WithAttribution(ctx, ri.ExplorationID, ri.IntentID)
+	if ri.TaskID > 0 {
+		ctx = llmrec.WithTaskID(ctx, strconv.FormatInt(ri.TaskID, 10))
+	}
 	return context.WithValue(ctx, runInfoKey{}, ri)
 }
 

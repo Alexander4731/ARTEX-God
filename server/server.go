@@ -350,6 +350,7 @@ func (s *Server) loadLLMConfig() (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	cfg.ClientCompat = p.ClientCompat
+	cfg.OmitThoughtSignatures = p.OmitThoughtSignatures
 	s.applyProfileRetry(&cfg, p)
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -524,6 +525,7 @@ func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
 	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
 	cfg.SessionHeaderKey = p.SessionHeaderKey
 	cfg.ClientCompat = p.ClientCompat
+	cfg.OmitThoughtSignatures = p.OmitThoughtSignatures
 	s.applyProfileRetry(&cfg, p)
 	if cfg.APIKey == "" {
 		return cfg, false
@@ -1444,6 +1446,7 @@ func (s *Server) testLLM(w http.ResponseWriter, r *http.Request) {
 		if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 			if req.ClientCompat == nil {
 				cfg.ClientCompat = p.ClientCompat
+				cfg.OmitThoughtSignatures = p.OmitThoughtSignatures
 			}
 			if cfg.APIKey == "" {
 				cfg.APIKey = p.APIKey

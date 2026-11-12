@@ -48,7 +48,7 @@ func (s *Server) wireInterceptReviewer() {
 		}
 		// Tag this call's usage as the "judge" lane so the config page can report
 		// how much the fallback approval has spent, separate from model profiles.
-		ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
+		ctx = llmrec.WithPurpose(llmrec.WithWorker(ctx, judgeWorkerLane), "judge")
 		text, err := reviewCompletion(ctx, prov, prompt, input)
 		if err != nil {
 			return intercept.Decision{ProfileID: profileID}, err

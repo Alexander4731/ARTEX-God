@@ -1455,3 +1455,5 @@ DO $$ BEGIN
                           AND n.kind IN ('goal','intent'));
     END IF;
 END $$;
+
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS omit_thought_signatures BOOLEAN NOT NULL DEFAULT false;

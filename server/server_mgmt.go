@@ -1797,12 +1797,13 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	// read; accept it here via a sibling field for create/update. Streaming is a
 	// *bool shadowing the embedded json:"streaming": an absent field must default
 	// to streaming (true), which a plain bool zero value (false = non-streaming)
-	// would get wrong — legacy/partial clients that never send it stay streaming.
+	// would get wrong. Updates preserve saved flags when omitted or null.
 	var body struct {
 		db.LLMProfile
-		APIKey       string `json:"api_key"`
-		Streaming    *bool  `json:"streaming"`
-		ClientCompat *bool  `json:"client_compat"`
+		APIKey                string `json:"api_key"`
+		Streaming             *bool  `json:"streaming"`
+		OmitThoughtSignatures *bool  `json:"omit_thought_signatures"`
+		ClientCompat          *bool  `json:"client_compat"`
 	}
 	if err := decode(r, &body); err != nil {
 		writeErr(w, 400, err.Error())
@@ -1816,18 +1817,25 @@ func (s *Server) pgSaveProfile(w http.ResponseWriter, r *http.Request) {
 	}
 	p.Format = format
 	p.APIKey = body.APIKey
-	p.Streaming = body.Streaming == nil || *body.Streaming
-	if body.ClientCompat != nil {
-		p.ClientCompat = *body.ClientCompat
-	} else if p.ID != 0 {
+	p.Streaming = true // New profiles retain the historical streaming default.
+	if p.ID != 0 && (body.Streaming == nil || body.ClientCompat == nil || body.OmitThoughtSignatures == nil) {
 		previous, err := pg.ProfileByID(p.ID)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
 		if previous != nil {
-			p.ClientCompat = previous.ClientCompat
+			p.Streaming, p.ClientCompat, p.OmitThoughtSignatures = previous.Streaming, previous.ClientCompat, previous.OmitThoughtSignatures
 		}
+	}
+	if body.Streaming != nil {
+		p.Streaming = *body.Streaming
+	}
+	if body.ClientCompat != nil {
+		p.ClientCompat = *body.ClientCompat
+	}
+	if body.OmitThoughtSignatures != nil {
+		p.OmitThoughtSignatures = *body.OmitThoughtSignatures
 	}
 	// 输出上限:负数无意义,归零(= 不发送该字段)。字段名开关只有 Chat Completions
 	// 用得上——anthropic 与 openai-responses 各自定死了字段名,存下来只会误导后续读者,

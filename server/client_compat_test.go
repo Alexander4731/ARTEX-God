@@ -32,7 +32,7 @@ func TestClientCompatProfileAndTestOverrides(t *testing.T) {
 		w.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"OK"}]}],"usage":{"input_tokens":1,"output_tokens":1}}`))
 	}))
 	defer upstream.Close()
-	id, err := pg.SaveProfile(&db.LLMProfile{Name: "test-client-compat-api", Format: "openai-responses", Model: "test-model", BaseURL: upstream.URL, APIKey: "stored-key", ClientCompat: true})
+	id, err := pg.SaveProfile(&db.LLMProfile{Name: "test-client-compat-api", Format: "openai-responses", Model: "test-model", BaseURL: upstream.URL, APIKey: "stored-key", ClientCompat: true, Streaming: false, OmitThoughtSignatures: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -82,14 +82,14 @@ func TestClientCompatProfileAndTestOverrides(t *testing.T) {
 			t.Fatal(err)
 		}
 		want := value == nil || value == true
-		if p.ClientCompat != want || p.APIKey != "stored-key" {
+		if p.ClientCompat != want || p.APIKey != "stored-key" || p.Streaming || !p.OmitThoughtSignatures {
 			t.Fatal("save lost compatibility or credentials")
 		}
 		if llmProfileDTO(p).ClientCompat != want {
 			t.Fatal("DTO lost compatibility")
 		}
 		cfg, ok := s.loadProfileConfig(id)
-		if !ok || cfg.ClientCompat != want {
+		if !ok || cfg.ClientCompat != want || !cfg.OmitThoughtSignatures {
 			t.Fatal("runtime profile lost compatibility")
 		}
 	}

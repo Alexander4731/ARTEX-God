@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/Autumn-27/artex/llmrec"
 	"log"
 	"sort"
 	"strings"
@@ -528,7 +529,7 @@ func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByI
 		MaxTokens: 1500,
 		Thinking:  "disabled",
 	}
-	msg, _, _, err := c.prov.Complete(ctx, req)
+	msg, _, _, err := c.prov.Complete(llmrec.WithPurpose(ctx, "compaction"), req)
 	if err != nil {
 		return "", err
 	}

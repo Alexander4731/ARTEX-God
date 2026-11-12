@@ -148,7 +148,7 @@ func (d *DB) TokenDailyAll(days int) ([]DailyTokenBucket, error) {
 		       COALESCE(SUM(input_tokens), 0),
 		       COALESCE(SUM(output_tokens), 0),
 		       COALESCE(SUM(cache_read_tokens), 0)
-		FROM activity
+		FROM llm_token_usage
 		WHERE kind = 'result'
 		  AND created_at >= NOW() - ($1 * INTERVAL '1 day')
 		GROUP BY day
@@ -1257,13 +1257,13 @@ func (d *DB) ExplorationDiag(expID int64) (expExists bool, taskRefs int, maxExpI
 }
 
 // TokenTotal sums token usage across ALL workers for this exploration (whole-task
-// total). Same source as TokenStatsByWorker (kind='result' rows), just ungrouped.
+// total). llm_usage is authoritative; activity is a fallback only for unmetered legacy explorations.
 func (s *ExplorationStore) TokenTotal() (TokenUsage, error) {
 	var u TokenUsage
 	err := s.db.QueryRow(`SELECT
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0)
-	FROM activity WHERE exploration_id=$1 AND kind='result'`, s.expID).
+	FROM llm_token_usage WHERE exploration_id=$1 AND kind='result'`, s.expID).
 		Scan(&u.InputTokens, &u.OutputTokens, &u.CacheReadTokens, &u.CacheWriteTokens)
 	return u, err
 }
@@ -1275,7 +1275,7 @@ func (d *DB) TokenTotalsAll() (map[int64]TokenUsage, error) {
 	rows, err := d.Query(`SELECT exploration_id,
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0)
-	FROM activity WHERE kind='result' GROUP BY exploration_id`)
+	FROM llm_token_usage WHERE kind='result' GROUP BY exploration_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1353,7 +1353,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			       SUM(output_tokens) AS output_tokens,
 			       SUM(cache_read_tokens) AS cache_read_tokens,
 			       SUM(cache_write_tokens) AS cache_write_tokens
-			FROM activity
+			FROM llm_token_usage
 			WHERE exploration_id=task.exploration_id AND kind='result'
 		) token_metrics ON true
 		LEFT JOIN LATERAL (
@@ -1445,7 +1445,7 @@ func (s *ExplorationStore) TokenStatsByWorker() ([]TokenUsage, error) {
 	rows, err := s.db.Query(`SELECT COALESCE(worker,''),
 		COALESCE(SUM(input_tokens),0), COALESCE(SUM(output_tokens),0),
 		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0)
-	FROM activity WHERE exploration_id=$1 AND kind='result'
+	FROM llm_token_usage WHERE exploration_id=$1 AND kind='result'
 	GROUP BY worker ORDER BY worker`, s.expID)
 	if err != nil {
 		return nil, err
@@ -1468,18 +1468,18 @@ func (s *ExplorationStore) TokenStatsByWorker() ([]TokenUsage, error) {
 func (s *ExplorationStore) TokenStatsBySession() ([]SessionTokenUsage, error) {
 	rows, err := s.db.Query(`SELECT
 		CASE
-			WHEN COALESCE(a.worker,'')='mainagent' THEN 'main:' || COALESCE(a.main_seg,0)::text
+			WHEN COALESCE(a.worker,'') IN ('mainagent','main') THEN 'main:' || COALESCE(a.main_seg,0)::text
 			WHEN COALESCE(a.worker,'')='planner' THEN 'plan'
 			WHEN n.id IS NOT NULL THEN 'intent:' || n.id::text
 			ELSE ''
 		END AS session_key,
 		COALESCE(SUM(a.input_tokens),0), COALESCE(SUM(a.output_tokens),0),
 		COALESCE(SUM(a.cache_read_tokens),0), COALESCE(SUM(a.cache_write_tokens),0)
-	FROM activity a
+	FROM llm_token_usage a
 	LEFT JOIN exploration_nodes n
 	  ON n.id=a.node_id AND n.exploration_id=a.exploration_id AND n.kind='intent'
 	WHERE a.exploration_id=$1 AND a.kind='result'
-	  AND (COALESCE(a.worker,'') IN ('mainagent','planner') OR n.id IS NOT NULL)
+	  AND (COALESCE(a.worker,'') IN ('mainagent','main','planner') OR n.id IS NOT NULL)
 	GROUP BY session_key
 	ORDER BY session_key`, s.expID)
 	if err != nil {

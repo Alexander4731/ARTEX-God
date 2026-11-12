@@ -6,8 +6,10 @@ package llmrec
 import (
 	"context"
 	"encoding/json"
+	"github.com/google/uuid"
 	"iter"
 	"log"
+	"strconv"
 	"strings"
 	"time"
 
@@ -93,6 +95,10 @@ func parseSession(s string) (taskID, worker string) {
 		return "", ""
 	}
 	rest := s[3:] // after "exp"
+	number, _, _ := strings.Cut(rest, "-")
+	if _, err := strconv.ParseUint(number, 10, 63); err != nil {
+		return "", ""
+	}
 	// split task number
 	i := strings.IndexByte(rest, '-')
 	if i < 0 {
@@ -129,10 +135,9 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 	expID := db.ParseExpID(parsedID)
 	taskID := TaskIDFrom(ctx)
-	if taskID == "" {
-		// Backward compatibility for non-task callers. For task calls, the task
-		// runtime always supplies the registry id explicitly.
-		taskID = parsedID
+	if taskID == "" && expID > 0 && r.pg != nil {
+		// Session numbers identify explorations, never task registry IDs.
+		_ = r.pg.QueryRowContext(ctx, "SELECT id::text FROM tasks WHERE exploration_id=$1", expID).Scan(&taskID)
 	}
 
 	// Serialize the request only when storing bodies (this is the expensive part).
@@ -148,6 +153,19 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 	}
 
 	return func(yield func(llm.StreamEvent, error) bool) {
+		callID := uuid.NewString()
+		attribution := callAttribution(ctx, session, worker, expID)
+		attempts := 0
+		var attemptUsage llm.Usage
+		ctx = llm.WithAttemptObserver(ctx, func(usage llm.Usage, err error) {
+			attempts++
+			attemptUsage.Add(usage)
+			status := "ok"
+			if err != nil {
+				status = "error"
+			}
+			r.recordUsage(taskID, attribution.ExplorationID, worker, usage, int(time.Since(start).Milliseconds()), status, callID, attempts, attribution, session)
+		})
 		var (
 			textBuf     strings.Builder
 			thinkingBuf strings.Builder
@@ -167,29 +185,34 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 				status = "error"
 			}
 			// Lightweight metering row — always written.
-			r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+			if attempts == 0 {
+				r.recordUsage(taskID, attribution.ExplorationID, worker, usage, int(time.Since(start).Milliseconds()), status, callID, 1, attribution, session)
+			} else {
+				usage = attemptUsage
+			}
 			// Heavy trace row — only when body recording is on.
 			if recordBodies {
 				r.record(req, session, taskID, worker, reqBody, capt, start, textBuf.String(), thinkingBuf.String(), usage, stopReason, err)
 			}
 		}
-		defer func() { finish(ctx.Err()) }()
+		defer func() {
+			if streamErr != nil {
+				finish(streamErr)
+			} else {
+				finish(ctx.Err())
+			}
+		}()
 
 		for ev, err := range r.inner.Stream(ctx, req) {
 			if err != nil {
 				streamErr = err
-				finish(streamErr)
 				if !yield(ev, err) {
 					return
 				}
 				return
 			}
 			// Always track usage (cheap); accumulate text/thinking only for bodies.
-			// Anthropic (and the other providers) split token usage across events:
-			// message_start carries ONLY the input side (input + cache), message_delta
-			// ONLY the output. They must be FOLDED with Add — overwriting on delta
-			// would zero out the input already counted at start (mirrors the SDK's own
-			// llm.Accumulator; see norma/llm/accumulate.go).
+			// The adapter marks cumulative snapshots; custom events remain deltas.
 			switch ev.Type {
 			case llm.SETextDelta:
 				if recordBodies {
@@ -200,12 +223,12 @@ func (r *Recorder) Stream(ctx context.Context, req llm.CompletionRequest) iter.S
 					thinkingBuf.WriteString(ev.Text)
 				}
 			case llm.SEMessageStart:
-				usage.Add(ev.Usage)
+				ev.FoldUsage(&usage)
 			case llm.SEMessageDelta:
 				if ev.StopReason != "" {
 					stopReason = ev.StopReason
 				}
-				usage.Add(ev.Usage)
+				ev.FoldUsage(&usage)
 			}
 			if !yield(ev, err) {
 				return
@@ -229,8 +252,9 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 	}
 	expID := db.ParseExpID(parsedID)
 	taskID := TaskIDFrom(ctx)
-	if taskID == "" {
-		taskID = parsedID
+	if taskID == "" && expID > 0 && r.pg != nil {
+		// Session numbers identify explorations, never task registry IDs.
+		_ = r.pg.QueryRowContext(ctx, "SELECT id::text FROM tasks WHERE exploration_id=$1", expID).Scan(&taskID)
 	}
 
 	reqBody := ""
@@ -240,12 +264,29 @@ func (r *Recorder) Complete(ctx context.Context, req llm.CompletionRequest) (llm
 		ctx, capt = NewCapture(ctx)
 	}
 
+	callID := uuid.NewString()
+	attribution := callAttribution(ctx, session, worker, expID)
+	attempts := 0
+	var attemptUsage llm.Usage
+	ctx = llm.WithAttemptObserver(ctx, func(usage llm.Usage, err error) {
+		attempts++
+		attemptUsage.Add(usage)
+		status := "ok"
+		if err != nil {
+			status = "error"
+		}
+		r.recordUsage(taskID, attribution.ExplorationID, worker, usage, int(time.Since(start).Milliseconds()), status, callID, attempts, attribution, session)
+	})
 	msg, stopReason, usage, err := r.inner.Complete(ctx, req)
 	status := "ok"
 	if err != nil {
 		status = "error"
 	}
-	r.recordUsage(taskID, expID, worker, usage, int(time.Since(start).Milliseconds()), status)
+	if attempts == 0 {
+		r.recordUsage(taskID, attribution.ExplorationID, worker, usage, int(time.Since(start).Milliseconds()), status, callID, 1, attribution, session)
+	} else {
+		usage = attemptUsage
+	}
 	if recordBodies {
 		r.record(req, session, taskID, worker, reqBody, capt, start, msg.Text(), thinkingText(msg), usage, stopReason, err)
 	}
@@ -264,7 +305,7 @@ func thinkingText(msg llm.Message) string {
 
 // recordUsage appends one lightweight metering row to llm_usage (no bodies). Skips
 // zero-token calls with no model, which carry nothing worth metering.
-func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage llm.Usage, latencyMs int, status string) {
+func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage llm.Usage, latencyMs int, status string, callID string, attemptID int, attribution attribution, session string) {
 	if r.pg == nil {
 		return
 	}
@@ -273,6 +314,7 @@ func (r *Recorder) recordUsage(taskID string, expID int64, worker string, usage 
 		return
 	}
 	err := r.pg.InsertLLMUsage(&db.LLMUsage{
+		CallID: callID, AttemptID: attemptID, IntentID: attribution.IntentID, Purpose: attribution.Purpose, SessionID: session,
 		TaskID:        taskID,
 		ExplorationID: expID,
 		Worker:        worker,

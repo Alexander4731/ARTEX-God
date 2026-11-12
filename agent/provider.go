@@ -75,7 +75,8 @@ type Config struct {
 	// 读取填入,因此同一共享 provider 也能按会话发出不同的头值。
 	SessionHeaderKey string
 	// ClientCompat adds protocol-specific Codex or Claude Code identification headers.
-	ClientCompat bool
+	OmitThoughtSignatures bool
+	ClientCompat          bool
 	// Retry 是该配置解析后的重试参数(profile 覆盖 → 全局策略 → 内置默认,由
 	// server 侧解析)。三层的含义见 RetryConfig;零值 = 完全沿用内置默认。
 	Retry RetryConfig
@@ -270,6 +271,7 @@ func (c Config) NewProvider() (llm.Provider, error) {
 	// 思考开关与强度两个字段各自透传(空 = 该字段不发送)。二者解耦:
 	// 可只发 thinking.type、只发 effort、都发、或都不发。
 	lc.ThinkingType = c.ThinkingType
+	lc.OmitThoughtSignatures = c.OmitThoughtSignatures
 	lc.ReasoningEffort = c.ReasoningEffort
 	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
 	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。

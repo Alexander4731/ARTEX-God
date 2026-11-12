@@ -108,7 +108,7 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 			return "", ErrContextBudget
 		}
 		b.calls++
-		msg, stop, usage, err := b.service.Provider.Complete(ctx, req)
+		msg, stop, usage, err := b.service.Provider.Complete(llm.WithCallPurpose(ctx, "sidequestion_summary"), req)
 		b.usage.Add(usage)
 		b.progress(b.info.Phase)
 		if ctx.Err() != nil {

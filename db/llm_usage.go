@@ -13,6 +13,12 @@ import (
 // only the dimensions needed to slice token spend (model / profile / task / agent),
 // never any prompt or response content.
 type LLMUsage struct {
+	CallID    string `json:"call_id,omitempty"`
+	AttemptID int    `json:"attempt_id,omitempty"`
+	IntentID  int64  `json:"intent_id,omitempty"`
+	Purpose   string `json:"purpose,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+
 	TaskID        string `json:"task_id"`        // task registry id (matches llm_records.task_id)
 	ExplorationID int64  `json:"exploration_id"` // exploration id parsed from the session (0 = unknown/non-task)
 	Worker        string `json:"worker"`         // agent lane: worker / planner / mainagent / goals
@@ -42,6 +48,21 @@ CREATE TABLE IF NOT EXISTS llm_usage (
     cache_write    INTEGER NOT NULL DEFAULT 0,
     status         TEXT
 );
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS call_id TEXT;
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS attempt_id INTEGER;
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS intent_id BIGINT;
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS purpose TEXT;
+ALTER TABLE llm_usage ADD COLUMN IF NOT EXISTS session_id TEXT;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_llm_usage_call_attempt ON llm_usage(call_id,attempt_id) WHERE call_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_llm_usage_intent ON llm_usage(exploration_id,intent_id);
+CREATE OR REPLACE VIEW llm_token_usage AS
+ SELECT exploration_id, worker, intent_id AS node_id, CASE WHEN session_id ~ '^exp[0-9]+-main-s[0-9]{1,9}$' THEN split_part(session_id,'-s',2)::integer ELSE 0 END AS main_seg, ts AS created_at,
+ input_tokens,output_tokens,cache_read AS cache_read_tokens,cache_write AS cache_write_tokens,'result'::text AS kind
+ FROM llm_usage WHERE exploration_id IS NOT NULL
+ UNION ALL
+ SELECT a.exploration_id,a.worker,a.node_id,a.main_seg,a.created_at,
+ a.input_tokens,a.output_tokens,a.cache_read_tokens,a.cache_write_tokens,a.kind
+ FROM activity a WHERE a.kind='result' AND NOT EXISTS (SELECT 1 FROM llm_usage u WHERE u.exploration_id=a.exploration_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_task  ON llm_usage(task_id);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_model ON llm_usage(task_id, model);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_exp   ON llm_usage(exploration_id);
@@ -71,10 +92,12 @@ func (d *DB) InsertLLMUsage(u *LLMUsage) error {
 		expID = u.ExplorationID
 	}
 	_, err := d.Exec(`
-INSERT INTO llm_usage(task_id, exploration_id, worker, model, profile_name, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status)
-VALUES (NULLIF($1,''),$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11)`,
+INSERT INTO llm_usage(task_id, exploration_id, worker, model, profile_name, latency_ms, input_tokens, output_tokens, cache_read, cache_write, status, call_id,attempt_id,intent_id,purpose,session_id)
+VALUES (NULLIF($1,''),CASE WHEN $1='' OR EXISTS(SELECT 1 FROM tasks WHERE id::text=$1 AND exploration_id=$2) THEN $2::bigint ELSE NULL END,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,$7,$8,$9,$10,$11,NULLIF($12,''),$13,
+ (SELECT id FROM exploration_nodes WHERE id=$14 AND exploration_id=$2 AND kind='intent'),NULLIF($15,''),NULLIF($16,''))
+ ON CONFLICT (call_id,attempt_id) WHERE call_id IS NOT NULL DO NOTHING`,
 		u.TaskID, expID, u.Worker, u.Model, u.ProfileName,
-		u.LatencyMs, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheWrite, u.Status)
+		u.LatencyMs, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheWrite, u.Status, u.CallID, max(1, u.AttemptID), u.IntentID, u.Purpose, u.SessionID)
 	return err
 }
 
