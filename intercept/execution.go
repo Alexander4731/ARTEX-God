@@ -198,7 +198,11 @@ func copyExecutionOutput(src, dst string) error {
 
 // ReplayExecutionReceipts only reads host-owned receipt envelopes and requires
 // exact original execution identity. It never invokes the underlying tool.
-func ReplayExecutionReceipts(ctx context.Context, d *db.DB, transcriptDir string) error {
+func ReplayExecutionReceipts(ctx context.Context, d *db.DB, transcriptDir string, taskIDs ...string) error {
+	taskID := ""
+	if len(taskIDs) > 0 {
+		taskID = taskIDs[0]
+	}
 	paths, err := filepath.Glob(filepath.Join(transcriptDir, "execution-receipts", "*", "*.pending.json"))
 	if err != nil {
 		return err
@@ -221,7 +225,7 @@ func ReplayExecutionReceipts(ctx context.Context, d *db.DB, transcriptDir string
 			continue
 		}
 		var matches bool
-		if err = d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tool_execution_receipts WHERE approval_id=$1 AND run_id=$2 AND tool_use_id=$3)`, r.ID, r.RunID, r.CallID).Scan(&matches); err != nil {
+		if err = d.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM tool_execution_receipts WHERE approval_id=$1 AND run_id=$2 AND tool_use_id=$3 AND ($4='' OR task_id=$4))`, r.ID, r.RunID, r.CallID, taskID).Scan(&matches); err != nil {
 			return err
 		}
 		if !matches {

@@ -89,7 +89,7 @@ func taskArchivePath(dataDir string, archiveID int64, taskID string) string {
 	return filepath.Join(taskArchiveRoot(dataDir), fmt.Sprintf("task-%s-%d.tar.zst", taskID, archiveID))
 }
 
-func stageTaskArchiveFiles(dataDir string, archiveID int64, taskID string, explorationID int64) (*taskArchiveFileStage, error) {
+func stageTaskArchiveFiles(dataDir string, archiveID int64, taskID string, explorationID int64, executionIDs ...int64) (*taskArchiveFileStage, error) {
 	root := filepath.Join(taskArchiveRoot(dataDir), ".staging", strconv.FormatInt(archiveID, 10))
 	stage := &taskArchiveFileStage{root: root, payload: filepath.Join(root, "payload")}
 	journalPath := filepath.Join(root, "journal.json")
@@ -137,6 +137,21 @@ func stageTaskArchiveFiles(dataDir string, archiveID int64, taskID string, explo
 		targets = append(targets, archiveFileMove{
 			Source: filepath.Join(transcriptDir, name), Relative: filepath.Join("files", "transcripts", name),
 		})
+	}
+	for _, id := range executionIDs {
+		if id <= 0 {
+			return nil, errors.New("invalid execution ID")
+		}
+		name := strconv.FormatInt(id, 10)
+		source := filepath.Join(transcriptDir, "execution-receipts", name)
+		if info, err := os.Lstat(source); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return nil, err
+		} else if !info.IsDir() {
+			return nil, errors.New("invalid execution spool directory")
+		}
+		targets = append(targets, archiveFileMove{Source: source, Relative: filepath.Join("executions", name)})
 	}
 	// Persist the complete plan before the first rename. Recovery can therefore
 	// roll back any prefix of the moves after an abrupt process termination.
@@ -249,6 +264,17 @@ func installTaskArchiveFiles(dataDir, extractedDir, taskID string, archiveID int
 		sources = append(sources, restoredArchivePath{
 			Source: filepath.Join(transcripts, entry.Name()), Destination: filepath.Join(dataDir, "transcripts", entry.Name()),
 		})
+	}
+	executionDirs, err := os.ReadDir(filepath.Join(extractedDir, "executions"))
+	if err != nil && !os.IsNotExist(err) {
+		return nil, err
+	}
+	for _, dir := range executionDirs {
+		id, err := strconv.ParseInt(dir.Name(), 10, 64)
+		if err != nil || id <= 0 || strconv.FormatInt(id, 10) != dir.Name() || !dir.IsDir() {
+			return nil, errors.New("invalid execution folder")
+		}
+		sources = append(sources, restoredArchivePath{Source: filepath.Join(extractedDir, "executions", dir.Name()), Destination: filepath.Join(dataDir, "transcripts", "execution-receipts", dir.Name())})
 	}
 	for _, move := range sources {
 		if _, err := os.Lstat(move.Destination); err == nil {

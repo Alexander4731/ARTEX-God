@@ -235,7 +235,7 @@ func (d *DB) ClaimExecutionRecovery(ctx context.Context, taskID string) (*Execut
 	token := rand.Text()
 	err = tx.QueryRowContext(ctx, `UPDATE execution_recoveries r SET state='checking',claim_token=$2,lease_until=now()+interval '90 seconds',version=version+1,updated_at=now()
 WHERE approval_id=(SELECT r2.approval_id FROM execution_recoveries r2 JOIN intercept_pending ip ON ip.id=r2.approval_id
-JOIN tasks t ON t.id::text=ip.task_id WHERE ip.task_id=$1 AND NOT t.paused AND t.status NOT IN ('done','failed','timeout')
+JOIN tasks t ON t.id::text=ip.task_id WHERE ip.task_id=$1 AND t.deleted_at IS NULL AND NOT EXISTS(SELECT 1 FROM task_archives a WHERE a.task_id=t.id AND a.state IN ('archive_queued','archiving','restoring','restore_queued')) AND NOT t.paused AND t.status NOT IN ('done','failed','timeout')
 AND EXISTS(SELECT 1 FROM task_execution_policies p WHERE p.task_id=t.id AND p.mode IN ('auto','observe'))
 AND (r2.state='pending' OR (r2.state='checking' AND r2.lease_until<now())) AND r2.next_check_at<=now()
 ORDER BY r2.next_check_at,r2.approval_id FOR UPDATE OF r2 SKIP LOCKED LIMIT 1) RETURNING approval_id`, taskID, token).Scan(&id)

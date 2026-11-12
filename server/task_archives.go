@@ -15,6 +15,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/traffic"
 )
 
@@ -142,7 +143,14 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 		return pgdb.ErrTaskArchiveNotFound
 	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "stage_files", 10)
-	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, task.ExplorationID)
+	if err := intercept.ReplayExecutionReceipts(s.ctx, s.m.pg, filepath.Join(s.m.dir, "transcripts"), taskID); err != nil {
+		return err
+	}
+	executionIDs, err := s.m.pg.ArchiveExecutionIDs(job.TaskID)
+	if err != nil {
+		return err
+	}
+	fileStage, err := stageTaskArchiveFiles(s.m.dir, job.ID, taskID, task.ExplorationID, executionIDs...)
 	if err != nil {
 		return err
 	}
@@ -186,6 +194,9 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 		return err
 	}
 	if err = s.evidenceStore().CopySnapshots(s.ctx, evidenceSnapshots, filepath.Join(fileStage.payload, "evidence")); err != nil {
+		return err
+	}
+	if err := archiveExecutionFiles(fileStage.payload, snapshot, false); err != nil {
 		return err
 	}
 	_ = s.m.pg.UpdateTaskArchiveProgress(job.ID, "compress", 50)
@@ -291,6 +302,14 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 
 func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb.TaskArchiveSnapshot, extracted string) (runErr error) {
 	var err error
+	if err := pgdb.ValidateArchiveExecutions(snapshot); err != nil {
+		return err
+	}
+	if snapshot.FormatVersion >= 4 {
+		if err := archiveExecutionFiles(extracted, snapshot, true); err != nil {
+			return err
+		}
+	}
 	var llmRecordsFile *os.File
 	relative, hasStreamedLLMRecords := snapshot.StreamedTables["llm_records"]
 	if len(snapshot.StreamedTables) > 0 &&

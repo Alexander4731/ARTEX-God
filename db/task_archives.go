@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	TaskArchiveFormatVersion       = 3
+	TaskArchiveFormatVersion       = 4
 	TaskArchiveLegacyFormatVersion = 1
 	TaskArchiveLLMRecordsPath      = "database/llm_records.ndjson"
 )
@@ -114,7 +114,17 @@ type TaskArchivePage struct {
 // TaskArchiveSnapshot is serialized into manifest.json inside the cold package.
 // Small tables remain JSON arrays in Tables. Large v2 tables are streamed to
 // package files listed in StreamedTables so their size is not bounded by memory.
+type ArchiveExecutionFile struct {
+	ApprovalID int64  `json:"approval_id"`
+	RunID      string `json:"run_id"`
+	ToolUseID  string `json:"tool_use_id"`
+	Name       string `json:"name"`
+	Size       int64  `json:"size"`
+	SHA256     string `json:"sha256"`
+}
+
 type TaskArchiveSnapshot struct {
+	ExecutionFiles    []ArchiveExecutionFile     `json:"execution_files,omitempty"`
 	FormatVersion     int                        `json:"format_version"`
 	CreatedAt         time.Time                  `json:"created_at"`
 	TaskID            int64                      `json:"task_id"`
@@ -597,6 +607,13 @@ func (d *DB) snapshotTaskArchive(taskID int64, llmRecords io.Writer) (*TaskArchi
 		{"side_question_sessions", `SELECT * FROM side_question_sessions WHERE task_id=$1 ORDER BY session_key`, []any{taskID}},
 		{"side_question_requests", `SELECT r.* FROM side_question_requests r JOIN side_question_sessions s ON s.session_key=r.session_key WHERE s.task_id=$1 ORDER BY r.ordinal`, []any{taskID}},
 		{"assets", `SELECT asset.* FROM assets asset WHERE asset.id IN (` + archiveAssetIDsQuery() + `) ORDER BY asset.id`, []any{taskID, expID}},
+	}
+	for _, table := range archiveExecutionTables {
+		queries = append(queries, struct {
+			name  string
+			query string
+			args  []any
+		}{table, archiveExecutionQuery(table), []any{strconv.FormatInt(taskID, 10)}})
 	}
 	counts := make(map[string]int64, len(queries))
 	streamedTables := map[string]string{}

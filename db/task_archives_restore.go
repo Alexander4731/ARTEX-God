@@ -24,6 +24,9 @@ func (d *DB) CompleteTaskArchive(
 	if snapshot == nil || snapshot.FormatVersion != TaskArchiveFormatVersion {
 		return ErrTaskArchiveFormatMismatch
 	}
+	if err := ValidateArchiveExecutions(snapshot); err != nil {
+		return err
+	}
 	countsRaw, err := json.Marshal(snapshot.DataCounts)
 	if err != nil {
 		return err
@@ -62,6 +65,9 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 	}
 	// Prevent task/asset ownership from changing while exclusivity is rechecked.
 	if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return err
+	}
+	if err := lockArchiveExecutions(tx, snapshot); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM intercept_pending WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(taskID, 10)); err != nil {
@@ -167,6 +173,9 @@ func (d *DB) restoreTaskArchive(
 ) ([]string, error) {
 	if snapshot == nil || !IsTaskArchiveFormatSupported(snapshot.FormatVersion) {
 		return nil, ErrTaskArchiveFormatMismatch
+	}
+	if err := ValidateArchiveExecutions(snapshot); err != nil {
+		return nil, err
 	}
 	streamedLLMRecords := snapshot.StreamedTables["llm_records"]
 	if (len(snapshot.StreamedTables) > 0 && snapshot.FormatVersion < 2) ||
@@ -294,6 +303,12 @@ WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID
 	}
 	if err := restoreInterceptRows(tx, remappedTables["intercept_pending"]); err != nil {
 		return nil, err
+	}
+	if err := restoreArchiveExecutions(tx, snapshot); err != nil {
+		return nil, err
+	}
+	if snapshot.FormatVersion < 4 {
+		warnings = append(warnings, "旧归档未包含权威执行回执和恢复历史；不能从审批摘要推断完整执行证据")
 	}
 	warningsRaw, _ := json.Marshal(warnings)
 	if _, err := tx.Exec(`UPDATE task_archives SET warnings=$2,phase='database_restored',progress=85,error='' WHERE id=$1`, archiveID, string(warningsRaw)); err != nil {
