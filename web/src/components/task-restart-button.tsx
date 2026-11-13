@@ -52,7 +52,7 @@ export function TaskRestartButton({
           title="重新启动任务"
         >
           {pending ? <Loader2Icon className="animate-spin" /> : <RotateCcwIcon />}
-          {!iconOnly && "重新启动"}
+          {!iconOnly && <span className="hidden sm:inline">重新启动</span>}
         </Button>
       </AlertDialogTrigger>
       <AlertDialogContent>
