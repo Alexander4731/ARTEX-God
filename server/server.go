@@ -1151,7 +1151,7 @@ func (s *Server) setActive(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"active": req.ID})
 }
 
-// control pauses/resumes a task's autonomous execution (planner + workers).
+// control pauses, resumes or explicitly restarts a task's autonomous execution.
 func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
@@ -1165,8 +1165,8 @@ func (s *Server) control(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	if req.Action != "pause" && req.Action != "resume" {
-		writeErr(w, 400, "action must be pause|resume")
+	if req.Action != "pause" && req.Action != "resume" && req.Action != "restart" {
+		writeErr(w, 400, "action must be pause|resume|restart")
 		return
 	}
 	result, err := s.applyTaskControl(t, req.Action)

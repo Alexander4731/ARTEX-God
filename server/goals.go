@@ -114,17 +114,21 @@ func (s *Server) runningTaskCount(excludeID string) int {
 // work. It atomically either starts the task or appends it to the persistent FIFO
 // queue. mode is bootstrap for a freshly-created task and resume otherwise.
 func (s *Server) admitTask(t *Task, mode string) (queued bool, err error) {
-	return s.admitTaskWhen(t, mode, false)
+	return s.admitTaskWhen(t, mode, "")
 }
 
 // admitPausedTask is the task-control resume path. The paused precondition is
 // checked under the same scheduler lock as admission so a concurrent pause,
 // dequeue or FIFO promotion cannot leave database and Engine state divergent.
 func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
-	return s.admitTaskWhen(t, "resume", true)
+	return s.admitTaskWhen(t, "resume", "paused")
 }
 
-func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued bool, err error) {
+func (s *Server) restartTask(t *Task) (queued bool, err error) {
+	return s.admitTaskWhen(t, "resume", "terminal")
+}
+
+func (s *Server) admitTaskWhen(t *Task, mode string, requiredState string) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
@@ -150,7 +154,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	} else if unknown {
 		return false, fmt.Errorf("存在结果未确认的工具操作，请先在审批记录中核验执行结果")
 	}
-	if requirePaused {
+	if requiredState == "paused" {
 		if isTerminalStatus(lifecycle.Status) {
 			return false, fmt.Errorf("终态任务不能执行继续")
 		}
@@ -158,6 +162,15 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 			return false, fmt.Errorf("仅已暂停的任务可以继续")
 		}
 		mode = s.resumeAdmissionMode(t)
+	}
+	restart := requiredState == "terminal"
+	if restart {
+		if !isTerminalStatus(lifecycle.Status) {
+			return false, fmt.Errorf("仅已完成、失败或超时的任务可以重新启动")
+		}
+		// No goals can remain after manual goal deletion or an interrupted bootstrap.
+		// The restart transaction seeds the current task objective in that case.
+		mode = "resume"
 	}
 	wasTerminal := isTerminalStatus(lifecycle.Status)
 	wasPaused := lifecycle.Paused || s.engine.IsPaused(t.ID)
@@ -213,7 +226,7 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 	if wasTerminal {
 		status = "running"
 	}
-	if err := s.m.ApplyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued); err != nil {
+	if err := s.m.applyTaskAdmission(t.ID, lifecycle.Status, status, shouldQueue, mode, wasQueued, restart); err != nil {
 		if !engineWasPaused && !wasPaused && !wasQueued {
 			s.engine.Resume(t)
 		}
@@ -224,6 +237,11 @@ func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (queued
 		// matching Engine gates before either parking it in FIFO or starting work;
 		// otherwise the old settling flag would make every worker skip forever.
 		s.engine.resetTerminalRevival(t.ID)
+	}
+	if restart {
+		message := "用户重新启动任务：保留历史和证据，重新核验当前目标；根据现有证据继续规划，不要原样重放已完成的工具操作。"
+		t.NotifyHint([]string{message})
+		s.engine.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: message})
 	}
 	if shouldQueue {
 		if !wasQueued {

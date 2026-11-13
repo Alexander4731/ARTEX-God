@@ -87,8 +87,7 @@ func (s *Server) resumeAdmissionMode(t *Task) string {
 }
 
 // applyTaskControl is shared by the single and batch endpoints. Task resume is
-// deliberately limited to paused tasks; reruns and finding follow-ups use
-// admitTask directly when they need to revive a terminal task.
+// limited to paused tasks; explicit restart reopens terminal tasks and their goals.
 func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, error) {
 	return s.applyTaskControlWithCause(t, action, agent.AbortPausedByUser)
 }
@@ -142,10 +141,17 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		}
 		out.Queued = queued
 		out.Status = map[bool]string{true: "queued", false: "running"}[queued]
+	case "restart":
+		queued, err := s.restartTask(t)
+		if err != nil {
+			return out, err
+		}
+		out.Queued = queued
+		out.Status = map[bool]string{true: "queued", false: "running"}[queued]
 	default:
-		return out, fmt.Errorf("action must be pause|resume")
+		return out, fmt.Errorf("action must be pause|resume|restart")
 	}
-	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "已暂停", "resume": "已继续"}[action])
+	log.Printf("[task] #%s %s", t.ID, map[string]string{"pause": "已暂停", "resume": "已继续", "restart": "已重新启动"}[action])
 	return out, nil
 }
 

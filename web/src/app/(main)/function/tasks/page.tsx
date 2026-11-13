@@ -49,6 +49,7 @@ import { StatusBadge } from "@/components/status-badge";
 import { TablePagination } from "@/components/table-pagination";
 import { TaskEditButton } from "@/components/task-edit-button";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
+import { TaskRestartButton } from "@/components/task-restart-button";
 import { TaskTemplateControls } from "@/components/task-template-controls";
 import {
   AlertDialog,
@@ -571,15 +572,19 @@ export default function TasksPage() {
   // 「先勾选再点批量」。清空 lastRef 让下一次轮询即使负载相同也照单接收,否则状态
   // 回写会被去重挡掉、按钮看起来没反应。
   const controlTask = React.useCallback(
-    async (id: string, action: "pause" | "resume") => {
+    async (id: string, action: "pause" | "resume" | "restart") => {
+      const label = { pause: "暂停", resume: "继续", restart: "重新启动" }[action];
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 15000);
       try {
-        const result = await api.controlTask(id, action);
+        const result = await api.controlTask(id, action, controller.signal);
         toast.success(
-          action === "pause" ? `任务 #${id} 已暂停` : `任务 #${id} 已继续${result.queued ? "，已进入队列" : ""}`,
+          `任务 #${id} 已${label}${result.queued ? "，已进入队列" : ""}`,
         );
       } catch (e) {
-        toast.error(`${action === "pause" ? "暂停" : "继续"}失败：${(e as Error).message}`);
+        toast.error(`${label}失败：${(e as Error).message}`);
       } finally {
+        clearTimeout(timeout);
         // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
         lastRef.current = "";
         load();
@@ -1196,7 +1201,7 @@ const TaskRow = React.memo(function TaskRow({
   task: Task;
   nowSec: number;
   onDelete: (id: string, options: DeleteTaskOptions) => Promise<void>;
-  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+  onControl: (id: string, action: "pause" | "resume" | "restart") => Promise<void>;
   onRename: (task: Task, name: string) => Promise<void>;
   onUpdated: () => void;
   onTogglePinned: (task: Task) => Promise<void>;
@@ -1456,16 +1461,18 @@ function taskControlIcon(pending: boolean, action: "pause" | "resume" | null) {
   return <PauseIcon />;
 }
 
-// TaskControlButton 是行内的暂停/继续开关。终态任务渲染为 disabled 而不是隐藏,
-// 这样各行操作列宽度一致,按钮位置不会随状态跳动。
+// Terminal tasks have an explicit restart action; batch resume stays pause-only.
 function TaskControlButton({
   task,
   onControl,
 }: {
   task: Task;
-  onControl: (id: string, action: "pause" | "resume") => Promise<void>;
+  onControl: (id: string, action: "pause" | "resume" | "restart") => Promise<void>;
 }) {
   const [pending, setPending] = React.useState(false);
+  if (["done", "failed", "timeout"].includes(task.status)) {
+    return <TaskRestartButton taskId={task.id} iconOnly onRestart={() => onControl(task.id, "restart")} />;
+  }
   const action = taskControlAction(task.status);
   const label = action === "resume" ? "继续任务" : "暂停任务";
   return (

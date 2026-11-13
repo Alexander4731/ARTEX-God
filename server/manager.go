@@ -1190,6 +1190,12 @@ func (m *Manager) SetTaskPaused(id string, paused bool) error {
 // admission keeps its FIFO timestamp; a task that was explicitly paused and is
 // now re-queued receives a fresh tail position.
 func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition bool) error {
+	return m.applyTaskAdmission(id, expectedStatus, status, queued, mode, preservePosition, false)
+}
+
+// A user restart reopens goal evaluation in the same transaction as admission.
+// Otherwise the planner can observe running + all goals met and finish immediately.
+func (m *Manager) applyTaskAdmission(id, expectedStatus, status string, queued bool, mode string, preservePosition, restart bool) error {
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)
@@ -1213,7 +1219,12 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 
 	var queuedAt, completedAt, firstRunAt, deadlineAt sql.NullTime
 	var committedMode string
-	err = m.pg.QueryRow(`UPDATE tasks
+	tx, err := m.pg.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	err = tx.QueryRow(`UPDATE tasks
 	SET status=$2,
 	    completed_at=CASE
 	        WHEN $2 IN ('done','failed','timeout') THEN COALESCE(completed_at, now())
@@ -1246,6 +1257,34 @@ func (m *Manager) ApplyTaskAdmission(id, expectedStatus, status string, queued b
 		return fmt.Errorf("task %s lifecycle changed before admission (expected status %q)", id, expectedStatus)
 	}
 	if err != nil {
+		return err
+	}
+	if restart {
+		if !isTerminalStatus(expectedStatus) || status != "running" {
+			return fmt.Errorf("restart requires a terminal task")
+		}
+		if _, err := tx.Exec(`UPDATE exploration_nodes SET state='open', blocked_reason=NULL,
+			content_version=content_version+1
+			WHERE exploration_id=(SELECT exploration_id FROM tasks WHERE id=$1) AND kind='goal'`, n); err != nil {
+			return err
+		}
+		// Keep existing goal IDs, evidence edges and intent history. A goalless task
+		// gets one goal from its current objective, so restart always reaches planning.
+		if _, err := tx.Exec(`WITH seeded AS (INSERT INTO exploration_nodes(exploration_id,kind,payload,priority,state,origin)
+			SELECT exploration_id,'goal',jsonb_build_object('text',COALESCE(NULLIF(BTRIM(goal),''),description)),0,'open','human'
+			FROM tasks t WHERE id=$1 AND NOT EXISTS
+			(SELECT 1 FROM exploration_nodes WHERE exploration_id=t.exploration_id AND kind='goal')
+			RETURNING id,exploration_id)
+			INSERT INTO exploration_edges(exploration_id,src_id,rel,dst_id)
+			SELECT g.exploration_id,root.id,$2,g.id FROM seeded g JOIN LATERAL
+			(SELECT id FROM exploration_nodes WHERE exploration_id=g.exploration_id AND kind='fact' AND state='origin' ORDER BY id LIMIT 1) root ON true`, n, pgdb.RelSpawns); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE tasks SET bootstrap_complete=true WHERE id=$1`, n); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 

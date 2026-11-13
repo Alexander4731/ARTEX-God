@@ -317,7 +317,7 @@ export const api = {
       active_llm_profile_id: activeLLMProfileId ?? null,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),
-  controlTask: (id: string, action: "pause" | "resume", signal?: AbortSignal) =>
+  controlTask: (id: string, action: "pause" | "resume" | "restart", signal?: AbortSignal) =>
     http<{ id: string; paused: boolean; queued: boolean; status: string }>(`/tasks/${id}/control`, {
       method: "POST", body: JSON.stringify({ action }), signal,
     }),

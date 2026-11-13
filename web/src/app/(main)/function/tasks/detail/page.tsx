@@ -5,12 +5,13 @@ import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
 
-import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CheckIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
+import { ArchiveIcon, ArrowLeftIcon, BrainIcon, CircleAlertIcon, PauseIcon, PlayIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { StatusBadge } from "@/components/status-badge";
 import { TaskEditButton } from "@/components/task-edit-button";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
+import { TaskRestartButton } from "@/components/task-restart-button";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
@@ -303,19 +304,19 @@ function TaskDetailInner() {
     setRefresh((value) => value + 1);
   }, []);
 
-  async function togglePause() {
-    if (controlPending.current || !task || task.id !== id || ["done", "failed", "timeout"].includes(task.status)) return;
+  async function controlTask(action: "pause" | "resume" | "restart") {
+    if (controlPending.current || archiving || !task || task.id !== id) return;
     controlPending.current = true;
     setControlling(true);
     const revision = ++taskRevision.current;
-    const next = !paused;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 15000);
     try {
-      await api.controlTask(id, next ? "pause" : "resume", controller.signal);
+      const result = await api.controlTask(id, action, controller.signal);
       if (revision !== taskRevision.current) return;
-      setPaused(next);
-      toast.success(next ? "已暂停探索" : "已恢复探索");
+      setPaused(result.paused);
+      const label = { pause: "已暂停探索", resume: "已恢复探索", restart: "已重新启动任务" }[action];
+      toast.success(label + (result.queued ? "，已进入队列" : ""));
     } catch (error) {
       if (revision === taskRevision.current) toast.error("操作失败：" + (error as Error).message);
     } finally {
@@ -327,7 +328,7 @@ function TaskDetailInner() {
   }
 
   async function archiveTask() {
-    if (!task || archiving) return;
+    if (!task || archiving || controlPending.current) return;
     setArchiving(true);
     try {
       await api.archiveTask(task.id);
@@ -354,7 +355,6 @@ function TaskDetailInner() {
     );
   }
 
-  const completed = task.status === "done";
   const terminal = ["done", "failed", "timeout"].includes(task.status);
   const archiveLifecycleEligible = terminal || paused || task.status === "paused";
   const canArchive = archiveLifecycleEligible && !task.archive_blocked_by_task_id;
@@ -366,11 +366,7 @@ function TaskDetailInner() {
   let controlVariant: "default" | "secondary" | "outline" = "outline";
   let controlIcon = <PauseIcon data-icon="inline-start" />;
   let controlLabel = "暂停";
-  if (terminal) {
-    controlVariant = "secondary";
-    controlIcon = <CheckIcon data-icon="inline-start" />;
-    controlLabel = completed ? "已完成" : "已结束";
-  } else if (paused) {
+  if (paused) {
     controlVariant = "default";
     controlIcon = <PlayIcon data-icon="inline-start" />;
     controlLabel = "恢复";
@@ -379,7 +375,7 @@ function TaskDetailInner() {
     <Button
       size="icon-sm"
       variant="ghost"
-      disabled={!canArchive || archiving}
+      disabled={!canArchive || archiving || controlling}
       aria-label={canArchive ? "归档任务" : archiveDisabledReason}
     >
       {archiving ? <Spinner /> : <ArchiveIcon />}
@@ -445,10 +441,14 @@ function TaskDetailInner() {
               <TooltipContent>{archiveDisabledReason}</TooltipContent>
             </Tooltip>
           )}
-          <Button size="sm" variant={controlVariant} onClick={togglePause} disabled={terminal || controlling || task.id !== id}>
-            {controlIcon}
-            {controlLabel}
-          </Button>
+          {terminal ? (
+            <TaskRestartButton taskId={task.id} onRestart={() => controlTask("restart")} disabled={controlling || archiving || task.id !== id} />
+          ) : (
+            <Button size="sm" variant={controlVariant} onClick={() => void controlTask(paused ? "resume" : "pause")} disabled={controlling || archiving || task.id !== id}>
+              {controlIcon}
+              {controlLabel}
+            </Button>
+          )}
         </div>
         <p className="truncate text-xs text-muted-foreground">{task.goal}</p>
         {/* Tabs */}
